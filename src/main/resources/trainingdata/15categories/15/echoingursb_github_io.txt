@@ -1,0 +1,20 @@
+我是一只小小熊 Echo “ 每天进步一点点 (=・ω・=) ” 主页 所有文章 文集 关于我 Echo “ 每天进步一点点 (=・ω・=) ” 主页 所有文章 hexo博客添加音乐&视频测试 2017-08-20 【你的名字/极致画质/1080p】超越时空的爱恋 只为寻找你的名字 more >> 技术 测试 展开全文 >> 利用Hexo和Github搭建个人博客 2017-08-20 开篇先聊一聊 作为一名混迹于互联网的小小蝼蚁，虽然自己没什么技术可言，但是我希望每天能够进步一点，学一点技术。其实这篇文章的目的主要是为了像我一样没什么技术，但是渴望成就感的人带来一丝丝安慰。(主要是为了满足一下自己装B的内心 =￣ω￣=) more >> 技术 博客 展开全文 >> HelloWorld 2017-08-20 categories: 日志 二级目录 tags: hello 1 2 3 4 5 6 7 8 9 10 11 12   ((`'-"``""-'`))    )   -    -  (   /   (o _ o)   \   \    ( 0 )    /   _'-.._'='_..-'_ /`;#'#'#.-.#'#'#;`\ \_))    '#'    ((_/   #.  ☆ ☆ ☆   #   '#.   Echo   .#'             / '#.      .#' \  _\  \'#. .#'/  /_ (((___) '#' (___) 摘要: more >> 展开全文 >> © 2017 Echo Hexo Theme Yilia by Litten 文集 关于我 tag: 技术 博客 测试 缺失模块。 1、请确保node版本大于6.2 2、在博客根目录（注意不是yilia根目录）执行以下命令： npm i hexo-generator-json-content --save 3、在根目录_config.yml里添加配置： 
+  jsonContent:
+    meta: false
+    pages: false
+    posts:
+      title: true
+      date: true
+      path: true
+      text: false
+      raw: false
+      content: false
+      slug: false
+      updated: false
+      comments: false
+      link: false
+      permalink: false
+      excerpt: false
+      categories: false
+      tags: true
+ 我是谁，我从哪里来，我到哪里去？我就是我，是颜色不一样的吃货…(=・ω・=)

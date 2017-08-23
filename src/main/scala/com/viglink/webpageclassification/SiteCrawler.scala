@@ -39,7 +39,7 @@ class SiteCrawler(clf: Classifier, maxDepth: Int = 2) {
         val pred = WebpageClassifier.predict(pageText, clf)
         val predLabel = pred.getLabeling.getBestLabel.toString
         val predLabelPretty = if (predLabel.contains('/')) predLabel.split('/').last else predLabel
-        
+
         //update prediction counts
         predictionCounts.contains(predLabelPretty) match {
           case true => predictionCounts(predLabelPretty) += 1

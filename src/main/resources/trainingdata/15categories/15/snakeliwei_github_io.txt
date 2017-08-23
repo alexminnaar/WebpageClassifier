@@ -1,0 +1,213 @@
+Lyndon Li's Blog Lyndon Li's Blog Archives Tags About Favorite Wiki Archives Tags About Favorite Wiki Lyndon Li Test Engineer & Web Developer Hubei, China FOLLOW 22 posts 19 tags Use nvm to manage node Jul 17 2017 Study 使用NVM来管理node的版本，并使用国内镜像安装 安装NVM 从GITHUB获取最新链接 Use curl curl -o- https://raw.githubusercontent.com/creationix/nvm/v0.33.2/install.sh | bash
+ or use wget curl -o- https://raw.githubusercontent.com/creationix/nvm/v0.33.2/install.sh | bash
+ 设置环境变量使用国内node镜像 $ vim ~/.bashrc
+
+#set nodejs env
+export NVM_NODEJS_ORG_MIRROR=http://npm.taobao.org/mirrors/node
+ 设置生效 $ source ~/.bashrc
+ 设置npm国内镜像 $ npm config set registry https://registry.npm.taobao.org
+ Share Comments Nodejs Nginx cros site Jul 12 2017 study 又是cors跨域…cors是啥？就是跨域请求。下面给出nginx cors的相关配置。 允许哪个域名来访问资源 add_header 'Access-Control-Allow-Origin' "$http_origin";
+ 请求的返回内容里包含cookies add_header 'Access-Control-Allow-Credentials' 'true';
+ 允许请求的method add_header 'Access-Control-Allow-Methods' 'GET, POST, OPTIONS';
+ nginx conf example: location / {
+       if ($request_method = 'OPTIONS') {
+                add_header 'Access-Control-Allow-Origin' "$http_origin";
+                add_header 'Access-Control-Allow-Methods' 'PUT, DELETE, GET, POST, OPTIONS';
+                add_header 'Access-Control-Allow-Headers' 'reqid, nid, host, x-real-ip, x-forwarded-ip, event-type, event-id, accept, content-type';
+                add_header 'Access-Control-Max-Age' 1728000;
+                return 204;
+             }
+        add_header 'Access-Control-Allow-Origin' "$http_origin";
+        add_header 'Access-Control-Allow-Credentials' 'true';
+        add_header 'Access-Control-Allow-Methods' 'PUT, GET, POST, OPTIONS, DELETE';
+        add_header 'Access-Control-Allow-Headers' 'reqid, nid, host, x-real-ip, x-forwarded-ip, event-type, event-id, accept, content-type';
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header Host $http_host;
+        proxy_redirect off;
+        proxy_connect_timeout 120s;
+        proxy_send_timeout 120s;
+        proxy_read_timeout 120s;
+        proxy_buffering    on;
+        proxy_buffer_size 64k;
+        proxy_buffers  4 32k;
+        proxy_busy_buffers_size 64k;
+        proxy_pass http://server;
+      }
+ Share Comments nginx 使用scp再linux间拷贝文件和目录 Jun 8 2017 Study scp命令可以在linux之间复制文件和目录 命令基本格式 scp [option] file_source file_target 从本地复制到远程 scp local_file remote_username@remote_ip:remote_folder
+scp local_file remote_username@remote_ip:remote_file
+scp local_file remote_ip:remote_folder
+scp local_file remote_ip:remote_file
+ 第1,2个指定了用户名，命令执行后需要再输入密码，第1个仅指定了远程的目录，文件名字不变，第2个指定了文件名； 第3,4个没有指定用户名，命令执行后需要输入用户名和密码，第3个仅指定了远程的目录，文件名字不变，第4个指定了文件名； scp /home/space/music/1.mp3 root@www.cumt.edu.cn:/home/root/others/music 
+scp /home/space/music/1.mp3 root@www.cumt.edu.cn:/home/root/others/music/001.mp3 
+scp /home/space/music/1.mp3 www.cumt.edu.cn:/home/root/others/music 
+scp /home/space/music/1.mp3 www.cumt.edu.cn:/home/root/others/music/001.mp3 
+ 复制目录： scp -r local_folder remote_username@remote_ip:remote_folder 
+scp -r local_folder remote_ip:remote_folder 
+ 第1个指定了用户名，命令执行后需要再输入密码； 第2个没有指定用户名，命令执行后需要输入用户名和密码； scp -r /home/space/music/ root@www.cumt.edu.cn:/home/root/others/ 
+scp -r /home/space/music/ www.cumt.edu.cn:/home/root/others/ 
+ 从远程复制到本地 从远程复制到本地, 只要将从本地复制到远程的命令的后2个参数调换顺序即可； scp root@www.cumt.edu.cn:/home/root/others/music /home/space/music/1.mp3 
+scp -r www.cumt.edu.cn:/home/root/others/ /home/space/music/
+ 最简单的应用如下: scp user@IP:filename remoteuser@IP:filename *可能有用的几个参数: * -v 和大多数linux命令中的-v意思一样, 用来显示进度.可以用来查看连接, 认证或是配置错误. -C 使能压缩选项. -P 选择端口. 注意-p已经被rcp使用. -4 强行使用IPV4地址. -6 强行使用IPV6地址. 注意两点 如果远程服务器防火墙有特殊限制，scp要走特殊端口，命令格式如下: scp -p 4588 remote@www.abc.com:/usr/local/sin.sh /home/administrator 使用scp要注意所使用的用户是否具有可读取远程服务器相应文件的权限。 Share Comments linux scp 给Linux开启BBR May 18 2017 Study 最近，Google 开源了其 TCP BBR 拥塞控制算法，并提交到了 Linux 内核，最新的 4.11 版内核已经用上了该算法。根据以往的传统，Google 总是先在自家的生产环境上线运用后，才会将代码开源，此次也不例外。 根据实地测试，在部署了最新版内核并开启了 TCP BBR 的机器上，网速甚至可以提升好几个数量级。 手动安装： Ubuntu系统下载对应版本和架构（amd64）的内核镜像（linux-image.+_amd64.deb）、内核头文件（linux-headers.+.deb），然后用 dpkg 安装并重启系统。 重启进入4.11.x 的内核之后，执行如下命令开启 BBR： sudo bash -c 'echo "net.core.default_qdisc=fq" >> /etc/sysctl.conf'
+sudo bash -c 'echo "net.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.conf'
+sudo sysctl -p
+ 执行如下命令确认 BBR 成功开启，两个命令的预期输出都是 1： sysctl net.ipv4.tcp_available_congestion_control | grep bbr | wc -l
+lsmod | grep tcp_bbr | wc -l
+ 开启 BBR 的效果还是蛮明显的，浏览器关闭缓存访问博客，完整加载耗时缩短将近一半。 懒人一键安装: wget --no-check-certificate https://github.com/teddysun/across/raw/master/bbr.sh
+chmod +x bbr.sh
+./bbr.sh
+ Share Comments linux Win/Mac 下修复exFAT 分区 May 17 2017 Other exfat分区由于各种原因有些不稳定，下面的方法仅供参考 Windows 下： 不要用磁盘修复，会提示必须先格式化。 管理员身份打开命令行（Cmd），输入以下代码： chkdsk {drive}: /f
+ 例如：chkdsk E: /f 表示修复E 盘 Mac 下： 过程略复杂，首先尝试用自带的磁盘工具（Disk Utility）修复，如果不成功再执行下面的步骤。 打开终端，输入： sudo fsck_exfat -d diskXsX
+ 这里diskXsX 表示要修复的分区，比如disk0s4 会出现一大堆文件列表，最后提示： Main boot region needs to be updated. Yes/No?
+ 输入Yes 即可。 最后再回到Disk Utility 去重新修复分区，这次就会成功了。 Share Comments tips 一首最近很流行的诗 May 15 2017 Other 一首最近很流行的诗与大家共勉 纽约时间比加州时间早三个小时，
+
+New York is 3 hours ahead of California,
+
+但加州时间并没有变慢。
+
+but it does not make California slow.
+
+有人22岁就毕业了，
+
+Someone graduated at the age of 22,
+
+但等了五年才找到好的工作！
+
+but waited 5 years before securing a good job!
+
+有人25岁就当上CEO，
+
+Someone became a CEO at 25,
+
+却在50岁去世。
+
+and died at 50.
+
+也有人迟到50岁才当上CEO，
+
+While another became a CEO at 50,
+
+然后活到90岁。
+
+and lived to 90 years.
+
+有人依然单身，
+
+Someone is still single,
+
+同时也有人已婚。
+
+while someone else got married.
+
+奥巴马55岁就退休，
+
+Obama retires at 55,
+
+川普70岁才开始当总统。
+
+but Trump starts at 70.
+
+世上每个人本来就有自己的发展时区。
+
+Absolutely everyone in this world works based on their Time Zone.
+
+身边有些人看似走在你前面，
+
+People around you might seem to go ahead of you,
+
+也有人看似走在你后面。
+
+some might seem to be behind you.
+
+但其实每个人在自己的时区有自己的步程。
+
+But everyone is running their own RACE, in their own TIME.
+
+不用嫉妒或嘲笑他们。
+
+Don’t envy them or mock them.
+
+他们都在自己的时区里，你也是！
+
+They are in their TIME ZONE, and you are in yours!
+
+生命就是等待正确的行动时机。
+
+Life is about waiting for the right moment to act.
+
+所以，放轻松。
+
+So, RELAX.
+
+你没有落后。
+
+You’re not LATE.
+
+你没有领先。
+
+You’re not EARLY.
+
+在命运为你安排的属于自己的时区里，一切都准时。
+
+You are very much ON TIME, and in your TIME ZONE Destiny set up for you.
+ Share Comments Poem OpenSSH config for mac 10.12.2 May 5 2017 Work 之前的mac os中添加私钥到keychain即可生效，重启后也生效，现在到了12.2后apple做了更新，重启后失效了。 在官网找到了解决办法如下，在.ssh/config中配置 Host test
+  HostName test.eg.com
+  port 55522
+  user deploy
+  IdentityFile ~/.ssh/id_rsa
+  UseKeychain yes     # 使用keychain 
+  AddKeysToAgent yes  # ssh-agent自动加载
+ Share Comments openssh tips After Docker Install Mar 2 2017 Study 在docker安装完毕后，需要进行必要的设置以便更好的为我们服务 安装Docker 推荐使用阿里云的国内源进行安装，原因你们知道的GFW，另外就是很快很方便传送门 消除"WARNING: No swap limit support" 这个默认官方给予解决方法了:链接 When users run Docker, they may see these messages when working with an image:
+
+WARNING: Your kernel does not support cgroup swap limit. WARNING: Your
+kernel does not support swap limit capabilities. Limitation discarded.
+To prevent these messages, enable memory and swap accounting on your system. To enable these on system using GNU GRUB (GNU GRand Unified Bootloader), do the following.
+
+Log into Ubuntu as a user with sudo privileges.
+
+Edit the /etc/default/grub file.
+
+Set the GRUB_CMDLINE_LINUX value as follows:
+
+GRUB_CMDLINE_LINUX="cgroup_enable=memory swapaccount=1"
+Save and close the file.
+
+Update GRUB.
+
+$ sudo update-grub
+Reboot your system.
+ 配置加速器，使用overlay，启用Live Restore 以ubuntu为例，其他发行版请自行查看官方文档 使用overlay需要内核版本在3.18以上，并且在内核中已启用传送门。启用Live Restore后在更新docker daemon时不影响已启动的容器。 Docker客户端版本大于1.10的用户 修改daemon配置文件/etc/docker/daemon.json： sudo mkdir -p /etc/docker
+sudo tee /etc/docker/daemon.json <<-'EOF'
+{
+  "registry-mirrors": ["https://knb1nxmo.mirror.aliyuncs.com"],
+  "storage-driver": "overlay",
+  "live-restore": true
+}
+EOF
+sudo systemctl daemon-reload
+sudo systemctl restart docker
+ Docker客户的版本小于等于1.10的用户或者想配置启动参数，可以使用下面的命令将配置添加到docker daemon的启动参数中。 Ubuntu 12.04 14.04的用户 echo "DOCKER_OPTS=\"\$DOCKER_OPTS --registry-mirror=https://knb1nxmo.mirror.aliyuncs.com -s overlay --live-restore=true \"" | sudo tee -a /etc/default/docker
+sudo service docker restart
+ Ubuntu 15.04 16.04的用户 sudo mkdir -p /etc/systemd/system/docker.service.d
+sudo tee /etc/systemd/system/docker.service.d/mirror.conf <<-'EOF'
+[Service]
+ExecStart=/usr/bin/docker daemon -H fd:// --registry-mirror=https://knb1nxmo.mirror.aliyuncs.com -s overlay --live-restore=true
+EOF
+sudo systemctl daemon-reload
+sudo systemctl restart docker
+ Share Comments Docker linux SSH 密钥类型的的选择（RSA， DSA or Other Nov 2 2016 linux 在用 ssh-keygen 生成密钥对时，通常会面临是使用RSA还是DSA的选择：RSA or DSA, this is a question! 原理与安全性： RSA 与 DSA 都是非对称加密算法。其中RSA的安全性是基于极其困难的大整数的分解（两个素数的乘积）；DSA 的安全性是基于整数有限域离散对数难题。基本上可以认为相同密钥长度的 RSA 算法与 DSA 算法安全性相当。 有点要注意，RSA 的安全性依赖于大数分解，但是否等同于大数分解一直未能得到理论上的证明，因为没有证明破解 RSA 就一定需要作大数分解。不过也不必太过担心，RSA 从诞生以来，经历了各种攻击，至今未被完全攻破（依靠暴力破解，小于1024位密钥长度的 RSA 有被攻破的记录，但未从算法上被攻破）。 用途： DSA 只能用于数字签名，而无法用于加密（某些扩展可以支持加密）；RSA 即可作为数字签名，也可以作为加密算法。不过作为加密使用的 RSA 有着随密钥长度增加，性能急剧下降的问题。 性能： 相同密钥长度下，DSA 做签名时速度更快，但做签名验证时速度较慢，一般情况验证签名的次数多于签名的次数。 相同密钥长度下，DSA （在扩展支持下）解密密文更快，而加密更慢；RSA 正好反过来，一般来说解密次数多于加密次数。不过由于非对称加密算法的先天性能问题，两者都不是加密的好选择。 业界支持： 在业界支持方面，RSA 显然是赢家。RSA 具有更为广泛的部署与支持。 使用 ssh-keygen 时的选择 上面说了那么多，可以看到RSA 与 DSA 各有优缺点。回到开头的问题，在使用 ssh-keygen 时，RSA 与 DSA到底选哪个？ 比较有意思的是，这个问题最终答案与上面那些优缺点无关。虽然理论上可以生成更长长度的 DSA 密钥 （NIST FIPS 186-3），但ssh-keygen在生成 DSA 密钥时，其长度只能为1024位（基于NIST FIPS 186-2）；而 ssh-keygen 在 RSA 的密钥长度上没有限制。 由于小于1024位密钥长度的 RSA 已经有被攻破的记录，所以说现在：RSA 2048 位密钥是更好的选择。 其它选择： RSA 与 DSA 各有优缺点，那有没一个更好的选择呢？答案是肯定的，ECC（Elliptic Curves Cryptography）：椭圆曲线算法。 ECC 与 RSA 相比，有以下的优点： 相同密钥长度下，安全性能更高，如160位ECC已经与1024位RSA、DSA有相同的安全强度。 计算量小，处理速度快，在私钥的处理速度上（解密和签名），ECC远 比RSA、DSA快得多。 存储空间占用小 ECC的密钥尺寸和系统参数与RSA、DSA相比要小得多， 所以占用的存储空间小得多。 带宽要求低使得ECC具有广泛得应用前景。 在 ssh-keygen 中，ECC 算法的相应参数是 “-t ecdsa”。可惜的是由于椭圆曲线算法只有在较新版本的 openssl 与 ssh-keygen 中才被支持，而无法得到普遍使用而去完全替代 RSA/DSA。不过由于椭圆曲线算法的优点，使其取代 RSA/DSA 而成为新一代通用的非对称加密算法成为可能，至少 SET 协议的制定者们已经把它作为下一代 SET 协议中缺省的公钥密码算法了。 Share Comments SSH 使用自签证书部署HTTPS Jul 15 2016 Study 项目马上要启用HTTPS，先找个东西练手 先生成一个RSA的key，加密算法选择aes也行，des3也行。这里使用1024位的des3。 openssl genrsa -des3 -out ssl.key 1024
+ 会提示必须输入一个密码，随便输入一个就行了，下面我们要解密后才给nginx使用。 openssl rsa -in ssl.key -out fm.key
+ 然后用这个key来生成一个证书请求。 openssl req -new -key fm.key -out fm.csr
+ 接着按照提示，输入证书的信息。 得到csr文件后，通过下面命令生成一个自签名的证书，x509是证书的格式，3650表示证书有效期为10年。 openssl x509 -req -days 3650 -in fm.csr -signkey fm.key -out fm.crt
+ 有了fm.crt和fm.key，就可以在nginx上搭建https的服务了 下面是nginx的server段配置参考 server {
+    listen 443 ssl deferred spdy;
+    server_name 120.24.x.x;
+    root /data/fm/www;
+    ssl on;
+    ssl_certificate /data/fm/online/certs/fm.crt;
+    ssl_certificate_key /data/fm/online/certs/fm.key;
+    ssl_session_cache shared:SSL:50m;
+    ssl_session_timeout 5m;
+    ...  ...
+}
+ 最后提供一个免费证书申请 自用也可用选择Let's Encrypt 只是蛋疼的DNS解析，如果这个解决还是非常不错的。 Share Comments Cert nginx tips 123Next » recents Use nvm to manage node Study Jul 17 2017 Nginx cros site study Jul 12 2017 使用scp再linux间拷贝文件和目录 Study Jun 8 2017 给Linux开启BBR Study May 18 2017 Win/Mac 下修复exFAT 分区 Other May 17 2017 links 开发者头条 StartupNews Google Ads script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"> © 2017 Lyndon Li Powered by Hexo. Theme by icarus.

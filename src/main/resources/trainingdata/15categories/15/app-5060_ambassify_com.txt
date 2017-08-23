@@ -1,0 +1,1 @@
+Ambassify Oops, an error occurred We failed to load the platform, you could try resolving this issue by using one of these supported modern browsers: Google Chrome, Safari, FireFox, Microsoft Edge. Underneath this line is information useful to our developers when attempting to fix this issue.

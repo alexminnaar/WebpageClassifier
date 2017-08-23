@@ -1,0 +1,1 @@
+站点创建成功!本页面由wdcp系统自动生成 站点创建成功! 站点创建成功,本页面由wdcp系统自动生成创建! 1 本页面所在目录为FTP根目录下的public_html 2 请上传网页到此目录,也就是public_html目录下,否则网站打开不正常 3 可覆盖或删除本页面 4 FTP软件可到此 下载 Powered by wdcp wdcp管理系统,wdOS系统,智能DNS系统,免费智能DNS解析,CDN管理系统,CDN加速,lanmp一键安装包 更多

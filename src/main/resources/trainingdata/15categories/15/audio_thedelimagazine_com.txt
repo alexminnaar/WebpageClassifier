@@ -1,0 +1,431 @@
+Delicious Audio Blog - Stompbox Exhibit, Synth Expo and MixCon | A blog about stompboxes, effect guitar pedals, and DIY recording Boost Boost Delay Echo Tape Echo Delay Distortion Fuzz Overdrive Dual Gain Distortion Compr. + Dynamics Dynamics EQ Filter Wah Filter+EQ Lo-Fi 8 Bit Lo-fi Chorus Flanger Phaser Tremolo Vibe Modulation Pitch Shifter Octaver pitch Reverb Reverb Synth Synth Effect Guides Best Of Lists Shopping Guides Coverage Info Facebook Stompbox Exhibit Boost Boost Delay Echo Tape Echo Delay Distortion Fuzz Overdrive Dual Gain Distortion Compr. + Dynamics Dynamics EQ Filter Wah Filter+EQ Lo-Fi 8 Bit Lo-fi Chorus Flanger Phaser Tremolo Vibe Modulation Pitch Shifter Octaver pitch Reverb Reverb Synth Synth Effect Guides Best Of Lists Shopping Guides Coverage Info Facebook Stompbox Exhibit Brooklyn Stompbox Exhibit at Main Drag Music Coming Up! Aug 7, 2017 The Deli, Delicious Audio, and Main Drag Music are proud to announce the 7th edition of The Brooklyn StompBox Exhibit, a free for all interactive display of guitar effect pedals  - pictures from last year's awesome show are here. READ MORE Mu-Fx PHASOR 2x phaser Mu-Fx PHASOR 2x phaser Cusack Music Orthrus Cusack Music Orthrus KHDK Scuzz Box Fuzz KHDK Scuzz Box Fuzz TWA Dynamorph – Crazy Filter Fuzz Synth TWA Dynamorph – Crazy Filter Fuzz Synth MXR Booster Mini Boost MXR Booster Mini Boost Walrus Audio ARP-87 Multi-Function Delay Walrus Audio ARP-87 Multi-Function Delay Adventure Audio Dream Reaper Adventure Audio Dream Reaper Nux Komp Core Deluxe Nux Komp Core Deluxe Hungry Robot – The Karman Line delay and oscillation device Hungry Robot – The Karman Line delay and oscillation device Cusack Music Tap-A-Delay – Delay + Modulation Cusack Music Tap-A-Delay – Delay + Modulation Black Cat OD-Fuzz Deluxe Black Cat OD-Fuzz Deluxe Seymour Duncan Palladium Gain Stage Seymour Duncan Palladium Gain Stage Strymon Sunset Dual Overdrive Strymon Sunset Dual Overdrive Dunlop Gypsy Fuzz and Uni-vibe Hendrix Pedals Dunlop Gypsy Fuzz and Uni-vibe Hendrix Pedals J Rockett Audio Rockaway Archer J Rockett Audio Rockaway Archer Matthews Effects The Chemist (Chorus/Vibrato, Phaser, Octave) Matthews Effects The Chemist (Chorus/Vibrato, Phaser, Octave) Cooper FX – Outward Delay / Sampler Cooper FX – Outward Delay / Sampler Alexander Pedals Syntax Error Alexander Pedals Syntax Error Electro-Harmonix Operation Overlord Boost + Overdrive Electro-Harmonix Operation Overlord Boost + Overdrive Sinvertek Fluid Time Delay MKII Sinvertek Fluid Time Delay MKII Mutoid Man’s Pedals & Creative Process How to improve your tone with an EQ pedal (by Wampler) Pedals at the Brooklyn Stompbox Exhibit 2017 [A-E] Salt Cathedral’s Live Rig Review: Old Blood Noise Fault OD/Distortion [by Gearphoria] Rage Against The Machine’s debut album turns 25! The pedals of Electric Eye’s Øystein Braut – in 2017 Manufacturer Profile – Ohmless Pedals Vintage, influential circuits: the Arbiter Fuzz Face [by Gearphoria] Z.Vex’s latest limited edition pedals (2016-2017) Fruit & Flowers’ Gear & Creative Process Living Room Gear’s Best 10 Pedals EVER! (Up to 2017) Page 1 of 6912345...102030...NextLast » Shopping Guides Artists' Gear Pedal Shopping Guides Best Uni-Vibe clones and Vibe inspired Pedals of 2017 - Compare Prices and Tone! Sometimes (more often than not?) life sends people and things on unexpected trajectories. The… Best Marshall Plexi Distortion Pedals (and Mini Pedals) under $300 (Almost) everyone familiar with the electric guitar loves the sound of a cranked Marshall Plexi.… Best Mini Delay & Echo Pedals of 2017: Compare Price and Features So the budget is tight, the space on your board is little, and you desperately need a delay… Best Mini Compressor Pedals of 2017 - Compare prices and tone! One of the most vital studio tools in history, the compressor does the job of "keeping in check"… Best Klones & Klon inspired pedals in 2017 - Compare prices and tone! Perhaps the most legendary (and expensive…) guitar pedal of all times, the Klon Centaur was one… Subscribe More Shopping Guides Here Artist’s Gear Jess Abbott of Tancred and Now, Now talks about gear and the creative process The solo project of Minneapolis singer/guitarist Jess Abbott of Now, Now, Tancred plays riff… Fruit & Flowers' Gear & Creative Process https://www.youtube.com/watch?v=DTR246Km6co If you are feeling in the mood for surfy and grungey… Wild Ones' Gear and Creative Process WILD ONES' CRUCIAL GEAR: --------------------------------------- Suzuki… WIN WIN's Gear and Creative Process WIN WIN'S CRUCIAL GEAR Apple Logic SoundToys Plug… Guerilla Toss - Q&A about Gear and the Creative Process behind 'GT Ultra' Brooklyn via Boston avant-punks Guerilla Toss are ready to enter the next stage of their career… Read more about artist's gear © 2017 Delicious Audio Blog – Stompbox Exhibit, Synth Expo and MixCon. All Rights Reserved. Global /* NEW CSS FOR STICKY SOCIAL ICONS */
+#s-share-buttons{
+    position: fixed;
+    left: 0;
+    top: 30%;
+}
+#s-share-buttons.s-share-w-c a{
+    display: block;
+  	margin :0px;
+  	border-radius:0px;
+}
+div.simplesocialbutton {
+    margin-right: 10px;
+}
+div.ssb-button-fblike {
+    width: auto!important;
+    max-width: 140px;
+}
+div.ssb-button-twitter {
+    width: auto!important;
+    max-width: 130px;
+}
+.post-content  .simplesocialbuttons:first .ssb-button-fblike{
+    margin:0px!important;
+    float:right!important;
+}
+/* NEW CSS */
+
+@media screen and (max-width: 580px) {
+    .post-category{
+        font-size: 6px !important;
+    }
+    .aligncenter{
+        width: 100% !important;
+    }
+    .Pedal_Icon {
+        background-size: 55px !important;
+        left: -11px !important;
+        top: -23px !important;
+    }
+
+    .list .post h2  a {
+        font-size: 20px;
+    }
+    
+     .list .post h2 a:hover{
+        font-size: 20px !important;
+    }
+    
+    .entry .post-meta h1 {
+        font-size: 20px;
+    }
+    
+    .logo a img {
+        content:url("http://audio.thedelimagazine.com/wp-content/uploads//2016/10/Delicious-Audio_m-logo-1.png");
+
+  // height: 71px; 
+
+    }
+    #floatingad{
+        width: 400px;
+    }
+
+    .menu {
+        display: none !important; 
+    }
+    
+    .sidebar {
+        display: none !important;
+    }
+    
+    #loop.list.clear {
+        
+        margin-left: 3%;
+        
+        width: 94%;
+    }
+    
+    .logo > a > img {
+        width: 54%;
+        padding-left: 1px;
+        
+    }
+    
+    .logo {
+        height: 60px;
+    }
+    
+    .header {
+        height: 140px;
+    }
+    
+    .menu2 ul li span.pedals {
+        padding: 47px 27px 0px 30px;
+        font-size: 10px;
+    }
+
+    .menu2 ul li span.gear {
+        padding: 47px 35px 0px 34px;
+        font-size: 10px;
+    }
+
+    .menu2 ul li span.recording {
+        padding: 47px 35px 0px 34px;
+        font-size: 10px;
+    }
+    
+    .menu2 ul li span.artist {
+        padding: 47px 35px 0px 34px;
+        font-size: 10px;
+    }
+
+    .menu2 ul li span.other {
+        padding: 47px 32px 0px 32px;
+        font-size: 10px;
+    }
+    
+    .menu2 ul {
+    margin: 2px 0 20px 10px;
+        
+    }
+    .Pedal_Icon {
+        background-size: 30px;
+        left: -15px;
+    }
+    .wrapper {
+        width: 415px;
+    }
+    
+    .wrapper2 {
+        width: 400px;
+    }
+    
+    .TopAdWrapper {
+        display: none;
+    }
+    .wp-pagenavi {
+        max-width: 415px;
+        padding-left: 12px;
+    }
+    #content {
+        max-width: 100%;
+    }
+    
+    .post-content iframe {
+        width: 100%;
+    }
+    
+    .entry {
+        padding: 10px;
+       
+    }
+   
+     #main-nav {
+        margin-left: 4px;
+        width: 403px;
+    }
+    .nav-secondary {
+        margin-left: 4px;
+        width: 403px;
+    }
+    
+    .textarea-wrapper{
+        margin-left: 4px;
+        width: 403px;
+    }
+    
+    #no-posts {
+        width: 403px;
+    }
+    .post-list {
+        margin-left: 6px;
+        width: 403px;
+    }
+    #footer {
+        width: 403px;
+    }
+    
+    .post-navigation {
+        width: 298px;
+    }
+    
+    #google_image_div {
+        display: none;
+    }
+    .gwd-page-content {
+        display: none;
+    }
+    
+      .nav-primary {
+        padding: 0 8px 24px;
+    }
+    #conversation {
+        padding: 0 8px 24px;
+    }
+    
+     #disqus_thread {
+        margin: 10px !important;
+    }
+    
+    html,body,.wrapper,.wrapper2,.wrapper3,.logo, .logo>a>img{
+        width:100%;
+    }
+    
+    .entry .post-content {
+        padding: 12px 0 0 6px;
+    }
+    
+    .list .post {
+        padding: 30px 25px 25px 22px;
+    }
+   
+   .logo {
+       margin-bottom: 20px;
+   }
+    
+    .header {
+    height: 165px;
+    }
+}
+
+
+@media screen and (max-width: 530px) {
+
+    .menu2 ul li span.pedals {
+        padding: 47px 24px 0px 24px;
+        font-size: 10px;
+    }
+
+    .menu2 ul li span.gear {
+        padding: 47px 30px 0px 30px;
+        font-size: 10px;
+    }
+
+    .menu2 ul li span.recording {
+        padding: 47px 30px 0px 30px;
+        font-size: 10px;
+    }
+    
+    .menu2 ul li span.artist {
+        padding: 47px 30px 0px 30px;
+        font-size: 10px;
+    }
+
+    .menu2 ul li span.other {
+        padding: 47px 25px 0px 30px;
+        font-size: 10px;
+    }
+
+}
+
+@media screen and (max-width: 470px) {
+
+    .menu2 ul li span.pedals {
+        padding: 47px 15px 0px 21px;
+        font-size: 10px;
+    }
+
+    .menu2 ul li span.gear {
+        padding: 47px 22px 0px 26px;
+        font-size: 10px;
+    }
+
+    .menu2 ul li span.recording {
+        padding: 47px 22px 0px 26px;
+        font-size: 10px;
+    }
+    
+    .menu2 ul li span.artist {
+        padding: 47px 22px 0px 26px;
+        font-size: 10px;
+    }
+
+    .menu2 ul li span.other {
+        padding: 47px 19px 0px 24px;
+        font-size: 10px;
+    }
+
+}
+
+@media screen and (max-width: 425px) {
+
+    .menu2 ul li span.pedals {
+        padding: 47px 15px 0px 15px;
+        font-size: 10px;
+    }
+
+    .menu2 ul li span.gear {
+        padding: 47px 21px 0px 21px;
+        font-size: 10px;
+    }
+
+    .menu2 ul li span.recording {
+        padding: 47px 21px 0px 21px;
+        font-size: 10px;
+    }
+    
+    .menu2 ul li span.artist {
+        padding: 47px 21px 0px 21px;
+        font-size: 10px;
+    }
+
+    .menu2 ul li span.other {
+        padding: 47px 19px 0px 18px;
+        font-size: 10px;
+    }
+
+}
+
+@media screen and (max-width: 375px) {
+
+    .menu2 ul li span.pedals {
+        padding: 47px 8px 0px 8px;
+        font-size: 10px;
+    }
+
+    .menu2 ul li span.gear {
+        padding: 47px 13px 0px 15px;
+        font-size: 10px;
+    }
+
+    .menu2 ul li span.recording {
+        padding: 47px 13px 0px 15px;
+        font-size: 10px;
+    }
+    
+    .menu2 ul li span.artist {
+        padding: 47px 13px 0px 15px;
+        font-size: 10px;
+    }
+
+    .menu2 ul li span.other {
+        padding: 47px 12px 0px 11px;
+        font-size: 10px;
+    }
+
+}
+
+
+
+
+
+
+@media screen and (max-width: 320px) {
+    .menu2 {
+        margin-left: 2%;
+    }
+    
+    .menu2 ul li span.pedals {
+        padding: 48px 8px 0px 4px;
+      
+    }
+
+    .menu2 ul li span.gear {
+        padding: 48px 9px 2px 9px;
+        
+    }
+
+    .menu2 ul li span.recording {
+        padding: 48px 9px 2px 9px;
+        
+    }
+    
+    .menu2 ul li span.artist {
+        padding: 48px 9px 2px 9px;
+        
+    }
+
+    .menu2 ul li span.other {
+        padding: 48px 10px 0px 10px;
+       
+    }
+    
+     .logo {
+       margin-bottom: 0px;
+   }
+    
+    .header {
+    height: 135px;
+    }
+    
+}
+
+ #div-gpt-ad-1475504307300-0,#div-gpt-ad-1475504307300-1{
+        display:none;
+        opacity:0;
+        position:absolute;
+        z-index:999;
+        left:50%;
+        margin-left:-150px;
+    }
+
+
+    
+@media screen and (min-width:581px){
+    
+    // #floatingad{
+    //      height:250px!important;
+         
+    // }
+ }
+
+@media screen and (max-width:581px){
+    
+    #div-gpt-ad-1475504307300-0,#div-gpt-ad-1475504307300-1{
+        display:block!imporatant;
+    }
+    #loop .post:nth-child(3),#loop .post:first-child{
+        margin-bottom:300px;
+    }
+    #floatingad{
+         //display:none!important;
+         width:90%!important;
+         border:none!important;
+    }
+    #floatingad  a  img, #floatingad > span{
+        width:100%!important;
+        height:auto!important;
+    }
+    
+
+}
+
+    .post-content iframe {
+    width: 100% !important;
+}
+
+
+
+
+ Save Write CSS OR LESS and hit save. CTRL + SPACE for auto-complete. Made by wpion.com

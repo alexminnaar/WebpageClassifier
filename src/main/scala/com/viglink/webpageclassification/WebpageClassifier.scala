@@ -92,6 +92,11 @@ object WebpageClassifier {
     clf.classify(clf.getInstancePipe.instanceFrom(new Instance(text, "", "", "")))
   }
 
+  def predictUrl(url:String, clf:Classifier):Classification={
+    val html = Jsoup.connect(url).get()
+    predict(html.text(),clf)
+  }
+
   /**
     * Remove html tags from an html file
     *
